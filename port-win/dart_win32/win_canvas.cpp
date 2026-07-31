@@ -351,5 +351,53 @@ const char* SnapshotHwndToPng(HWND hwnd, const wchar_t* path) {
   return err;
 }
 
+// Full-window capture (non-client frame + menu bar included). Same DIB->WIC->PNG
+// path as SnapshotHwndToPng, but sized to the WINDOW rect and WITHOUT PW_CLIENTONLY
+// so PrintWindow renders the menu bar and frame too.
+const char* SnapshotWindowFullToPng(HWND hwnd, const wchar_t* path) {
+  if (!EnsureFactories()) return "WIC factory unavailable";
+  RECT wr;
+  GetWindowRect(hwnd, &wr);
+  int w = wr.right - wr.left, h = wr.bottom - wr.top;
+  if (w <= 0 || h <= 0) return "window has no size";
+  RedrawWindow(hwnd, nullptr, nullptr,
+               RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_ERASE | RDW_FRAME);
+
+  HDC screen = GetDC(nullptr);
+  HDC mem = CreateCompatibleDC(screen);
+  HBITMAP bmp = CreateCompatibleBitmap(screen, w, h);
+  HGDIOBJ old = SelectObject(mem, bmp);
+  if (!PrintWindow(hwnd, mem, PW_RENDERFULLCONTENT)) {   // whole window incl. menu
+    PrintWindow(hwnd, mem, 0);
+  }
+
+  BITMAPINFO bi = {0};
+  bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bi.bmiHeader.biWidth = w;
+  bi.bmiHeader.biHeight = -h;   // top-down
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  std::vector<unsigned char> px((size_t)w * h * 4);
+  GetDIBits(mem, bmp, 0, h, px.data(), &bi, DIB_RGB_COLORS);
+  for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
+
+  const char* err = nullptr;
+  IWICBitmap* wicbmp = nullptr;
+  if (SUCCEEDED(g_wic->CreateBitmapFromMemory((UINT)w, (UINT)h,
+          GUID_WICPixelFormat32bppBGRA, (UINT)(w * 4), (UINT)px.size(),
+          px.data(), &wicbmp))) {
+    err = EncodeToPng(wicbmp, (UINT)w, (UINT)h, GUID_WICPixelFormat32bppBGRA, path);
+    wicbmp->Release();
+  } else {
+    err = "WIC bitmap from DIB failed";
+  }
+  SelectObject(mem, old);
+  DeleteObject(bmp);
+  DeleteDC(mem);
+  ReleaseDC(nullptr, screen);
+  return err;
+}
+
 }  // namespace bin
 }  // namespace dart

@@ -60,6 +60,10 @@ List<int> lexDart(String s) {
 // ── state ────────────────────────────────────────────────────────────────────
 Ui ui;
 int activeTab = 0;
+// The pane (container) client size, refreshed on every resize (kind 7). Tab
+// layouts are computed from these so content reflows to fill the window.
+int paneW = 1084;
+int paneH = 712;
 List<String> content = <String>[];        // ids of the current tab's content widgets
 StringBuffer wsLog = new StringBuffer();
 final tabNames = const ['Workspace','Browser','Editor','Find','Docs','App','Debug','VM','Help'];
@@ -68,6 +72,15 @@ Map<String, ClassMirror> classMirrors = <String, ClassMirror>{};
 List<String> classNames = <String>[];
 List<String> members = <String>[];
 String currentClass = '';
+
+// ── Categorized browser (item 4): library -> class -> (vars|methods) -> source ─
+List<String> libraryNames = <String>[];                       // dart:core, dart:io, ...
+Map<String, List<String>> classesInLib = <String, List<String>>{};  // library -> classes
+Map<String, String> libOfClass = <String, String>{};         // class -> owning library
+String currentLib = '';
+List<String> libClasses = <String>[];                         // classes in currentLib
+List<String> brVars = <String>[];                             // currentClass variables
+List<String> brMethods = <String>[];                          // currentClass methods
 
 String imgPath;
 
@@ -93,16 +106,91 @@ void loadMembers(String cls) {
   members.sort();
 }
 
+// ── Mirror-driven declaration rendering (real signatures for VM classes) ──────
+String _typeName(TypeMirror t) {
+  if (t == null) return 'dynamic';
+  try {
+    var n = MirrorSystem.getName(t.simpleName);
+    return n.isEmpty ? 'dynamic' : n;
+  } catch (e) { return 'dynamic'; }
+}
+
+String _paramList(MethodMirror m) {
+  try {
+    // Group by kind so the WHOLE named set shares one {...} and the whole
+    // optional-positional set shares one [...] — one brace per param produced
+    // invalid Dart, e.g. Duration({int days}, {int hours}, ...).
+    var req = <String>[], opt = <String>[], named = <String>[];
+    for (var p in m.parameters) {
+      var pn = MirrorSystem.getName(p.simpleName);
+      var s = '${_typeName(p.type)} $pn';
+      if (p.isNamed) named.add(s);
+      else if (p.isOptional) opt.add(s);
+      else req.add(s);
+    }
+    var parts = <String>[];
+    parts.addAll(req);
+    if (opt.isNotEmpty) parts.add('[${opt.join(', ')}]');
+    if (named.isNotEmpty) parts.add('{${named.join(', ')}}');
+    return parts.join(', ');
+  } catch (e) { return ''; }
+}
+
+String _methodDecl(String cls, MethodMirror m) {
+  var name = MirrorSystem.getName(m.simpleName);
+  var stat = m.isStatic ? 'static ' : '';
+  if (m.isConstructor) {
+    var cn = '';
+    try { cn = MirrorSystem.getName(m.constructorName); } catch (e) {}
+    var full = cn.isEmpty ? cls : '$cls.$cn';
+    return '$full(${_paramList(m)});';
+  }
+  var ret = _typeName(m.returnType);
+  if (m.isGetter) return '$stat$ret get $name;';
+  if (m.isSetter) {
+    var base = name.endsWith('=') ? name.substring(0, name.length - 1) : name;
+    return '${stat}set $base(${_paramList(m)});';
+  }
+  if (m.isOperator) return '$stat$ret operator $name(${_paramList(m)});';
+  return '$stat$ret $name(${_paramList(m)});';
+}
+
+// The full class declaration from the live VM class mirror: real field types,
+// constructor/accessor/method signatures (no bodies — the VM has no source for
+// snapshot classes), grouped and sorted. Used by the Browser/Docs/Editor source
+// panes for VM classes.
 String classSketch(String name) {
   var cm = classMirrors[name];
   var sb = new StringBuffer();
-  sb.writeln('// $name  (declaration sketch from the live VM class mirror)');
+  sb.writeln('// $name  (declaration from the live VM class mirror — signatures, no bodies)');
+  if (cm == null) { sb.writeln('class $name {\n}'); return sb.toString(); }
   var sup = '';
-  if (cm != null && cm.superclass != null) {
-    sup = ' extends ' + MirrorSystem.getName(cm.superclass.simpleName);
-  }
+  try {
+    if (cm.superclass != null) sup = ' extends ' + MirrorSystem.getName(cm.superclass.simpleName);
+  } catch (e) {}
   sb.writeln('class $name$sup {');
-  for (var m in members) { sb.writeln('  $m;'); }
+  var vars = <String>[], ctors = <String>[], acc = <String>[], meths = <String>[];
+  cm.declarations.forEach((sym, d) {
+    try {
+      var nm = MirrorSystem.getName(sym);
+      if (nm.isEmpty || nm.startsWith('_')) return;
+      if (d is VariableMirror) {
+        var stat = d.isStatic ? 'static ' : '';
+        var fin = d.isFinal ? 'final ' : '';
+        vars.add('  $stat$fin${_typeName(d.type)} $nm;');
+      } else if (d is MethodMirror) {
+        var line = '  ' + _methodDecl(name, d);
+        if (d.isConstructor) ctors.add(line);
+        else if (d.isGetter || d.isSetter) acc.add(line);
+        else meths.add(line);
+      }
+    } catch (e) { /* one declaration's mirror threw — skip it, keep the rest */ }
+  });
+  vars.sort(); ctors.sort(); acc.sort(); meths.sort();
+  if (vars.isNotEmpty)  { sb.writeln('  // fields');       for (var l in vars)  sb.writeln(l); }
+  if (ctors.isNotEmpty) { sb.writeln('  // constructors'); for (var l in ctors) sb.writeln(l); }
+  if (acc.isNotEmpty)   { sb.writeln('  // accessors');    for (var l in acc)   sb.writeln(l); }
+  if (meths.isNotEmpty) { sb.writeln('  // methods');      for (var l in meths) sb.writeln(l); }
   sb.writeln('}');
   return sb.toString();
 }
@@ -132,12 +220,18 @@ void clearContent() {
 }
 
 void buildWorkspace() {
-  ui.label('ws_lbl', text: 'Workspace   -   type Dart, click Do It (evaluates against the live VM)', frame: <int>[12, 36, 900, 18]); track('ws_lbl');
-  ui.editor('ws_editor', text: '(2 + 3) * 7', frame: <int>[12, 58, 1060, 220]); track('ws_editor');
-  ui.button('ws_doit', title: 'Do It', frame: <int>[12, 286, 100, 28], onClick: doIt); track('ws_doit');
-  ui.label('ws_hint', text: '(result appended to Output below)', frame: <int>[124, 290, 500, 18]); track('ws_hint');
-  ui.label('ws_outl', text: 'Output', frame: <int>[12, 322, 200, 18]); track('ws_outl');
-  ui.editor('ws_output', frame: <int>[12, 344, 1060, 360]); track('ws_output');
+  var W = paneW, H = paneH;
+  var edH = ((H - 58) * 0.40).round();     // editor ~40% of the pane height
+  var doitY = 58 + edH + 8;
+  var outlY = doitY + 34;
+  var outY = outlY + 22;
+  var outH = H - outY - 10;
+  ui.label('ws_lbl', text: 'Workspace   -   type Dart, click Do It (evaluates against the live VM)', frame: <int>[12, 36, W - 24, 18]); track('ws_lbl');
+  ui.editor('ws_editor', text: '(2 + 3) * 7', frame: <int>[12, 58, W - 24, edH]); track('ws_editor');
+  ui.button('ws_doit', title: 'Do It', frame: <int>[12, doitY, 100, 28], onClick: doIt); track('ws_doit');
+  ui.label('ws_hint', text: '(result appended to Output below)', frame: <int>[124, doitY + 4, 500, 18]); track('ws_hint');
+  ui.label('ws_outl', text: 'Output', frame: <int>[12, outlY, 200, 18]); track('ws_outl');
+  ui.editor('ws_output', frame: <int>[12, outY, W - 24, outH]); track('ws_output');
   ui.set('ws_output', {'text': wr(wsLog.toString())});
 }
 
@@ -152,44 +246,249 @@ void doIt() {
   ui.commit();
 }
 
+// The classic drill-down: Libraries | Classes | (Variables / Methods) | Source.
+// Categories are dart:mirrors libraries; each column narrows the selection.
 void buildBrowser() {
-  ui.label('br_cl', text: 'Classes (${classNames.length})', frame: <int>[12, 36, 260, 18]); track('br_cl');
-  ui.list('br_classes', frame: <int>[12, 58, 260, 646],
-      rowCount: () => classNames.length, cellAt: (r) => classNames[r], onSelect: selectClass); track('br_classes');
-  var ml = currentClass.isEmpty ? 'Members' : 'Members of $currentClass (${members.length})';
-  ui.label('br_ml', text: ml, frame: <int>[284, 36, 340, 18]); track('br_ml');
-  ui.list('br_members', frame: <int>[284, 58, 340, 646],
-      rowCount: () => members.length, cellAt: (r) => members[r], onSelect: (r) {}); track('br_members');
-  ui.label('br_sl', text: 'Source', frame: <int>[636, 36, 400, 18]); track('br_sl');
-  ui.editor('br_source', frame: <int>[636, 58, 436, 646]); track('br_source');
-  if (currentClass.isNotEmpty) {
+  var W = paneW, H = paneH;
+  var listH = H - 68;
+  var libX = 12,           libW = 176;
+  var clsX = libX + libW + 8, clsW = 196;
+  var memX = clsX + clsW + 8, memW = 236;
+  var srcX = memX + memW + 8, srcW = W - srcX - 12;
+  var varH = ((listH - 22) * 0.42).round();     // variables pane ~top 42%
+  var methLblY = 58 + varH + 4;
+  var methY = 58 + varH + 22;
+  var methH = listH - varH - 22;                 // methods pane fills the rest
+
+  if (currentLib.isEmpty && libraryNames.isNotEmpty) {   // default category
+    currentLib = libraryNames.contains('dart:core') ? 'dart:core' : libraryNames[0];
+    libClasses = classesInLib[currentLib] ?? <String>[];
+  }
+
+  ui.label('br_libl', text: 'Libraries (${libraryNames.length})', frame: <int>[libX, 36, libW, 18]); track('br_libl');
+  ui.list('br_libs', frame: <int>[libX, 58, libW, listH],
+      rowCount: () => libraryNames.length, cellAt: (r) => libraryNames[r], onSelect: selectLibrary); track('br_libs');
+
+  ui.label('br_ll', text: 'Classes (${libClasses.length})', frame: <int>[clsX, 36, clsW, 18]); track('br_ll');
+  ui.list('br_classes', frame: <int>[clsX, 58, clsW, listH],
+      rowCount: () => libClasses.length, cellAt: (r) => libClasses[r], onSelect: selectLibClass); track('br_classes');
+  // A user-draggable divider between the Libraries and Classes panes (item 5).
+  ui.splitter('br_split', orientation: 'vertical', frame: <int>[libX + libW + 2, 58, 6, listH],
+      between: <String>['br_libs', 'br_classes']); track('br_split');
+
+  ui.label('br_vl', text: currentClass.isEmpty ? 'Variables' : 'Variables (${brVars.length})', frame: <int>[memX, 36, memW, 18]); track('br_vl');
+  ui.list('br_vars', frame: <int>[memX, 58, memW, varH],
+      rowCount: () => brVars.length, cellAt: (r) => brVars[r], onSelect: selectBrVar); track('br_vars');
+  ui.label('br_ml', text: currentClass.isEmpty ? 'Methods' : 'Methods (${brMethods.length})', frame: <int>[memX, methLblY, memW, 18]); track('br_ml');
+  ui.list('br_meths', frame: <int>[memX, methY, memW, methH],
+      rowCount: () => brMethods.length, cellAt: (r) => brMethods[r], onSelect: selectBrMethod); track('br_meths');
+
+  ui.label('br_sl', text: 'Source', frame: <int>[srcX, 36, srcW, 18]); track('br_sl');
+  ui.editor('br_source', frame: <int>[srcX, 58, srcW, listH]); track('br_source');
+
+  if (currentClass.isNotEmpty) {                 // restore member panes after a rebuild
+    loadVarsMethods(currentClass);
+    ui.set('br_vl', {'text': 'Variables (${brVars.length})'});
+    ui.set('br_ml', {'text': 'Methods (${brMethods.length})'});
+    ui.set('br_vars', {'rows': brVars.length});
+    ui.set('br_meths', {'rows': brMethods.length});
     var src = classSketch(currentClass);
     ui.set('br_source', {'text': wr(src)});
   }
 }
 
-void selectClass(int r) {
-  if (r < 0 || r >= classNames.length) return;
-  currentClass = classNames[r];
-  loadMembers(currentClass);
-  ui.set('br_ml', {'text': 'Members of $currentClass (${members.length})'});
-  ui.set('br_members', {'rows': members.length});
-  var src = classSketch(currentClass);
+// Split a class's declarations into variable + method rows (short signatures).
+void loadVarsMethods(String cls) {
+  brVars = <String>[]; brMethods = <String>[];
+  var cm = classMirrors[cls];
+  if (cm == null) return;
+  cm.declarations.forEach((sym, d) {
+    var nm = MirrorSystem.getName(sym);
+    if (nm.isEmpty || nm.startsWith('_')) return;
+    if (d is VariableMirror) {
+      brVars.add((d.isStatic ? 'static ' : '') + (d.isFinal ? 'final ' : '') + _typeName(d.type) + ' ' + nm);
+    } else if (d is MethodMirror) {
+      brMethods.add(_methodDecl(cls, d));
+    }
+  });
+  brVars.sort(); brMethods.sort();
+}
+
+// Category pane: pick a library -> repopulate the Classes pane, clear the rest.
+void selectLibrary(int r) {
+  if (r < 0 || r >= libraryNames.length) return;
+  currentLib = libraryNames[r];
+  libClasses = classesInLib[currentLib] ?? <String>[];
+  currentClass = ''; brVars = <String>[]; brMethods = <String>[];
+  ui.set('br_ll', {'text': 'Classes (${libClasses.length})'});
+  ui.set('br_classes', {'rows': libClasses.length});
+  ui.set('br_vl', {'text': 'Variables'});
+  ui.set('br_ml', {'text': 'Methods'});
+  ui.set('br_vars', {'rows': 0});
+  ui.set('br_meths', {'rows': 0});
+  ui.set('br_source', {'text': ''});
+  ui.commit();
+  print('LIB: $currentLib -> ${libClasses.length} classes');
+}
+
+// Classes pane: pick a class within the current library.
+void selectLibClass(int r) {
+  if (r < 0 || r >= libClasses.length) return;
+  var cls = libClasses[r];
+  browseToClass(cls);
+  var flat = classNames.indexOf(cls);
+  if (flat >= 0 && !_browseNav) _browseRecord(flat);
+  print('BROWSE: class $cls -> ${brVars.length} vars, ${brMethods.length} methods');
+}
+
+// Navigate to a class by NAME: sync the category + class panes, load its vars +
+// methods, show its declaration. The shared entry point for the Classes pane,
+// Find jumps, and toolbar Back/Forward/Home.
+void browseToClass(String cls) {
+  var lib = libOfClass[cls];
+  if (lib != null && (lib != currentLib || libClasses.isEmpty)) {
+    currentLib = lib;
+    libClasses = classesInLib[lib] ?? <String>[];
+    ui.set('br_ll', {'text': 'Classes (${libClasses.length})'});
+    ui.set('br_classes', {'rows': libClasses.length});
+  }
+  currentClass = cls;
+  loadVarsMethods(cls);
+  ui.set('br_vl', {'text': 'Variables (${brVars.length})'});
+  ui.set('br_ml', {'text': 'Methods (${brMethods.length})'});
+  ui.set('br_vars', {'rows': brVars.length});
+  ui.set('br_meths', {'rows': brMethods.length});
+  var src = classSketch(cls);
   ui.set('br_source', {'text': wr(src)});
   ui.commit();
   ui.applySpans('br_source', lexDart(src));
-  print('BROWSE: class $currentClass -> ${members.length} members');
+}
+
+// Member panes -> the Source pane shows the selected member's declaration.
+void selectBrVar(int r) {
+  if (r < 0 || r >= brVars.length) return;
+  var src = '// $currentLib  ::  $currentClass\n${brVars[r]};\n';
+  ui.set('br_source', {'text': wr(src)}); ui.commit();
+  ui.applySpans('br_source', lexDart(src));
+  print('BROWSE: var ${brVars[r]}');
+}
+void selectBrMethod(int r) {
+  if (r < 0 || r >= brMethods.length) return;
+  var src = '// $currentLib  ::  $currentClass\n${brMethods[r]}\n';
+  ui.set('br_source', {'text': wr(src)}); ui.commit();
+  ui.applySpans('br_source', lexDart(src));
+  print('BROWSE: method ${brMethods[r]}');
+}
+
+// Flat-index entry (toolbar Back/Forward/Home history, Find jumps).
+void selectClass(int r) {
+  if (r < 0 || r >= classNames.length) return;
+  browseToClass(classNames[r]);
+  if (!_browseNav) _browseRecord(r);
+  print('BROWSE: class ${classNames[r]}');
+}
+
+// ── Browser navigation (toolbar Home / Back / Forward) ────────────────────────
+// A back/forward stack of class indices, cursor at the current position. A fresh
+// selectClass (user click, Find jump) pushes; Back/Forward move the cursor and
+// re-select WITHOUT re-recording (guarded by _browseNav).
+List<int> browseHistory = <int>[];
+int browseCursor = -1;
+bool _browseNav = false;
+
+void _browseRecord(int idx) {
+  if (browseCursor >= 0 && browseCursor < browseHistory.length &&
+      browseHistory[browseCursor] == idx) return;          // ignore a repeat
+  if (browseCursor < browseHistory.length - 1) {
+    browseHistory = browseHistory.sublist(0, browseCursor + 1);   // drop the forward tail
+  }
+  browseHistory.add(idx);
+  browseCursor = browseHistory.length - 1;
+}
+
+void _browseGo(int idx) {                    // navigate without recording
+  if (activeTab != 1) switchTab(1);
+  _browseNav = true;
+  selectClass(idx);
+  _browseNav = false;
+}
+
+void browseBack() {
+  if (activeTab != 1) switchTab(1);
+  if (browseCursor > 0) { browseCursor--; _browseGo(browseHistory[browseCursor]); }
+  print('NAV: back -> cursor $browseCursor/${browseHistory.length - 1}');
+}
+
+void browseForward() {
+  if (activeTab != 1) switchTab(1);
+  if (browseCursor < browseHistory.length - 1) {
+    browseCursor++; _browseGo(browseHistory[browseCursor]);
+  }
+  print('NAV: forward -> cursor $browseCursor/${browseHistory.length - 1}');
+}
+
+void browseHome() {                          // Browser tab, reset to the top class
+  if (activeTab != 1) switchTab(1);
+  if (classNames.isNotEmpty) selectClass(0);   // records (default _browseNav == false)
+  print('NAV: home -> ${classNames.isEmpty ? "" : classNames[0]}');
+}
+
+// The Editor is now pick-a-class-then-edit: a class-selector dropdown lists the
+// user classes stored in the image plus the live VM classes (via mirrors).
+String currentEditClass = 'Counter';
+List<String> editorClassList = <String>[];
+
+void buildEditorClassList() {
+  var seen = new Set<String>();
+  editorClassList = <String>[];
+  var db = openImage();
+  var rows = db.query('SELECT name FROM classes ORDER BY name', const []);
+  db.close();
+  for (var r in rows) { var n = r[0].toString(); if (seen.add(n)) editorClassList.add(n); }
+  if (seen.add('Counter')) editorClassList.insert(0, 'Counter');     // always offer Counter
+  for (var n in classNames) { if (seen.add(n)) editorClassList.add(n); }   // then VM classes
+}
+
+String editorSourceFor(String cls) {
+  var db = openImage();
+  var rows = db.query('SELECT source FROM classes WHERE name = ?', [cls]);
+  db.close();
+  if (rows.isNotEmpty && rows[0][0].toString().isNotEmpty) return rows[0][0].toString();
+  if (cls == 'Counter') {
+    return 'class Counter {\n  int n = 0;\n  int step = 1;\n  Counter bump() { n = n + step; return this; }\n}';
+  }
+  if (classMirrors.containsKey(cls)) { loadMembers(cls); return classSketch(cls); }
+  return 'class $cls {\n}';
+}
+
+void loadEditorClass(String cls) {
+  currentEditClass = cls;
+  var src = editorSourceFor(cls);
+  ui.set('ed_source', {'text': wr(src)});
+  ui.set('ed_status', {'text': 'editing $cls'});
+  ui.commit();
+  ui.applySpans('ed_source', lexDart(src));
+  print('EDITOR: selected class $cls');
 }
 
 void buildEditor() {
-  ui.label('ed_lbl', text: 'Editor   -   edit a user class + Accept (persists to the SQLite image, reloads the isolate)', frame: <int>[12, 36, 1000, 18]); track('ed_lbl');
-  ui.editor('ed_source', frame: <int>[12, 58, 720, 380]); track('ed_source');
-  ui.button('ed_accept', title: 'Accept', frame: <int>[12, 446, 120, 28], onClick: accept); track('ed_accept');
-  ui.label('ed_status', text: 'edit the class above, then Accept', frame: <int>[148, 450, 900, 18]); track('ed_status');
-  ui.label('ed_note', text: 'Accept writes the source to the image (survives restart) + hot-reloads. Live-instance morph: see workspace_morph.dart (S7.3).', frame: <int>[12, 486, 1040, 18]); track('ed_note');
-  ui.label('ed_img', text: 'image: $imgPath', frame: <int>[12, 512, 1000, 18]); track('ed_img');
-  var src = userClassSource();
+  if (editorClassList.isEmpty) buildEditorClassList();
+  var W = paneW, H = paneH;
+  var srcH = H - 92 - 100;                 // editor fills, leaving room for the footer
+  var acceptY = 92 + srcH + 10;
+  ui.label('ed_lbl', text: 'Editor   -   pick a class, edit its source, Accept (persists to the SQLite image + hot-reloads)', frame: <int>[12, 36, W - 24, 18]); track('ed_lbl');
+  ui.label('ed_cl_lbl', text: 'Class:', frame: <int>[12, 62, 48, 18]); track('ed_cl_lbl');
+  ui.popup('ed_class', items: editorClassList, frame: <int>[64, 58, 320, 260],
+      onSelect: (i) { if (i >= 0 && i < editorClassList.length) loadEditorClass(editorClassList[i]); }); track('ed_class');
+  ui.editor('ed_source', frame: <int>[12, 92, W - 24, srcH]); track('ed_source');
+  ui.button('ed_accept', title: 'Accept', frame: <int>[12, acceptY, 120, 28], onClick: accept); track('ed_accept');
+  ui.label('ed_status', text: 'editing $currentEditClass', frame: <int>[148, acceptY + 4, W - 160, 18]); track('ed_status');
+  ui.label('ed_note', text: 'Accept writes the source to the image (survives restart) + hot-reloads. Live-instance morph: see workspace_morph.dart (S7.3).', frame: <int>[12, acceptY + 36, W - 24, 18]); track('ed_note');
+  ui.label('ed_img', text: 'image: $imgPath', frame: <int>[12, acceptY + 62, W - 24, 18]); track('ed_img');
+  var src = editorSourceFor(currentEditClass);
   ui.set('ed_source', {'text': wr(src)});
+  var idx = editorClassList.indexOf(currentEditClass);
+  if (idx >= 0) ui.set('ed_class', {'index': idx});
   ui.commit();
   ui.applySpans('ed_source', lexDart(src));
 }
@@ -198,15 +497,15 @@ void accept() {
   var sel = ui.editorSelection('ed_source');
   var src = sel[2].toString().replaceAll('\r\n', '\n').replaceAll('\r', '\n').trim();
   var db = openImage();
-  db.exec('INSERT OR REPLACE INTO classes(name, source) VALUES(?, ?)', ['Counter', src]);
+  db.exec('INSERT OR REPLACE INTO classes(name, source) VALUES(?, ?)', [currentEditClass, src]);
   db.close();
   wsRequestUiReload();
   ui.set('ed_status', {'text': 'Accept: persisted to image + requested reload...'});
   ui.commit();
   new Timer(new Duration(milliseconds: 300), () {
-    ui.set('ed_status', {'text': 'Accepted -> image updated + reloaded ("${wsUiReloadStatus()}")'});
+    ui.set('ed_status', {'text': 'Accepted $currentEditClass -> image updated + reloaded ("${wsUiReloadStatus()}")'});
     ui.commit();
-    print('ACCEPT: persisted Counter, reload = "${wsUiReloadStatus()}"');
+    print('ACCEPT: persisted $currentEditClass, reload = "${wsUiReloadStatus()}"');
   });
 }
 
@@ -235,11 +534,12 @@ void refreshVM() {
 // ── Find tab (T2): substring over classes + members -> jump to Browser ────────
 List<String> findResults = <String>[];
 void buildFind() {
-  ui.label('fd_lbl', text: 'Find   -   substring over classes and members (from the VM class table)', frame: <int>[12, 36, 900, 18]); track('fd_lbl');
+  var W = paneW, H = paneH;
+  ui.label('fd_lbl', text: 'Find   -   substring over classes and members (from the VM class table)', frame: <int>[12, 36, W - 24, 18]); track('fd_lbl');
   ui.field('fd_q', text: '', frame: <int>[12, 58, 300, 24], onEnter: doFind); track('fd_q');
   ui.button('fd_go', title: 'Find', frame: <int>[320, 57, 80, 26], onClick: doFind); track('fd_go');
-  ui.label('fd_rl', text: 'Matches (click a result to open it in the Browser)', frame: <int>[12, 92, 700, 18]); track('fd_rl');
-  ui.list('fd_results', frame: <int>[12, 114, 760, 590],
+  ui.label('fd_rl', text: 'Matches (click a result to open it in the Browser)', frame: <int>[12, 92, W - 24, 18]); track('fd_rl');
+  ui.list('fd_results', frame: <int>[12, 114, W - 24, H - 124],
       rowCount: () => findResults.length, cellAt: (r) => findResults[r], onSelect: openFindResult); track('fd_results');
 }
 void doFind() {
@@ -334,11 +634,14 @@ void buildApp() {
 
 // ── Docs tab (T2): a class/member reference from the VM class table ───────────
 void buildDocs() {
-  ui.label('dc_lbl', text: 'Docs   -   the VM class reference (select a class to see its members)', frame: <int>[12, 36, 900, 18]); track('dc_lbl');
-  ui.list('dc_classes', frame: <int>[12, 58, 300, 646],
+  var W = paneW, H = paneH;
+  var listH = H - 68;
+  var detX = 324, detW = W - detX - 12;
+  ui.label('dc_lbl', text: 'Docs   -   the VM class reference (select a class to see its members)', frame: <int>[12, 36, W - 24, 18]); track('dc_lbl');
+  ui.list('dc_classes', frame: <int>[12, 58, 300, listH],
       rowCount: () => classNames.length, cellAt: (r) => classNames[r], onSelect: selectDocsClass); track('dc_classes');
-  ui.label('dc_dl', text: 'Members', frame: <int>[324, 36, 400, 18]); track('dc_dl');
-  ui.editor('dc_detail', frame: <int>[324, 58, 748, 646]); track('dc_detail');
+  ui.label('dc_dl', text: 'Members', frame: <int>[detX, 36, detW, 18]); track('dc_dl');
+  ui.editor('dc_detail', frame: <int>[detX, 58, detW, listH]); track('dc_detail');
 }
 void selectDocsClass(int r) {
   if (r < 0 || r >= classNames.length) return;
@@ -353,8 +656,9 @@ void selectDocsClass(int r) {
 
 // ── Help tab (T2): about / usage / keybindings ────────────────────────────────
 void buildHelp() {
-  ui.label('hp_lbl', text: 'Help   -   WINDART workspace', frame: <int>[12, 36, 900, 18]); track('hp_lbl');
-  ui.editor('hp_text', frame: <int>[12, 58, 1060, 646]); track('hp_text');
+  var W = paneW, H = paneH;
+  ui.label('hp_lbl', text: 'Help   -   WINDART workspace', frame: <int>[12, 36, W - 24, 18]); track('hp_lbl');
+  ui.editor('hp_text', frame: <int>[12, 58, W - 24, H - 68]); track('hp_text');
   var help =
       'WINDART  -  a live Windows Dart workspace (Dart 1.24.3 JIT, native Win32 + Direct2D)\n'
       '\n'
@@ -541,24 +845,113 @@ void switchTab(int i) {          // programmatic (self-test): set the strip + re
   buildTab(i);
 }
 
+// Coalesce a burst of WM_SIZE events (a continuous border drag fires many per
+// second) into ONE relayout on the trailing edge — a full tab teardown/rebuild
+// per event flickers the RichEdit controls. paneW/paneH track the latest size
+// immediately so a mid-drag tab switch still lays out at the current bounds.
+Timer _resizeTimer = null;
+int _resizeW = 0, _resizeH = 0;
+void onResizeCoalesced(int w, int h) {
+  if (w <= 0 || h <= 0) return;
+  _resizeW = w; _resizeH = h;
+  paneW = w; paneH = h;
+  if (_resizeTimer != null) _resizeTimer.cancel();
+  _resizeTimer = new Timer(new Duration(milliseconds: 60), () {
+    _resizeTimer = null;
+    relayout(_resizeW, _resizeH);
+  });
+}
+
+// Reflow for a new pane (container) size (kind-7 resize). Re-place the tab strip
+// across the new width, then rebuild the active tab so its size-parameterized
+// layout fills the new bounds. buildTab commits; the strip 'place' rides along.
+void relayout(int w, int h) {
+  if (w <= 0 || h <= 0) return;
+  paneW = w; paneH = h;
+  ui.place('tabs', <int>[0, 0, w, 26]);
+  buildTab(activeTab);
+  print('RESIZE: pane ${w}x$h -> tab $activeTab relaid out');
+}
+
 void snap(String name) {
   var e = ui.snapshot('e:/windart/build/$name.png');
   print('SNAP: $name ${e.isEmpty ? "OK" : "ERR:$e"}');
+}
+
+// ── menu / toolbar commands (polled from the host queue) ──────────────────────
+// The host's menu bar + icon toolbar push Dart-routed command ids; we poll them
+// (wsMenuPoll) and map ids -> actions. Ids MUST match win_host.h (WinHostCommand).
+void menuDoIt() {
+  if (activeTab != 0) switchTab(0);
+  var code = ui.textOf('ws_editor');
+  if (code == null) return;
+  code = code.replaceAll('\r', ' ').replaceAll('\n', ' ').trim();
+  if (code.isEmpty) return;
+  var result = wsEval(code);
+  wsLog.writeln('$code   =>   $result');
+  ui.set('ws_output', {'text': wr(wsLog.toString())});
+  ui.commit();
+  print('MENU-DOIT: $code => $result');
+}
+
+void dispatchMenu(int id) {
+  if (id >= 200 && id <= 208) { switchTab(id - 200); print('MENU: tab ${id - 200}'); return; }
+  switch (id) {
+    case 140: case 141: menuDoIt(); break;                 // Do It / Print It
+    case 148:                                              // Refresh
+      buildTab(activeTab); if (activeTab == 7) refreshVM(); break;
+    case 130:                                              // New Class
+      switchTab(2);
+      currentEditClass = 'NewClass';
+      ui.set('ed_source', {'text': wr('class NewClass {\n  \n}')});
+      ui.set('ed_status', {'text': 'new class (edit + Accept to create)'});
+      ui.commit();
+      break;
+    case 131: buildEditorClassList(); switchTab(2); break; // Open (refresh class list)
+    case 132: if (activeTab != 2) switchTab(2); accept(); break;   // Save
+    case 145: browseHome(); break;                         // Home -> Browser, top class
+    case 146: browseBack(); break;                         // Back (browser history)
+    case 147: browseForward(); break;                      // Forward (browser history)
+    case 149: switchTab(3); break;                         // Find
+    case 150: switchTab(1); break;                         // Browse -> Browser
+    default: break;
+  }
+  print('MENU: dispatched cmd $id');
+}
+
+void pollMenu() {
+  var id = wsMenuPoll();
+  while (id >= 0) { dispatchMenu(id); id = wsMenuPoll(); }
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
 main(List<String> args) {
   var selftest = args.contains('selftest');
 
-  // Browser data: the VM's class table.
+  // Browser data: the VM's class table, grouped by library (the Browser's
+  // categories). classMirrors/classNames stay flat for Find/Docs/nav.
   for (var lib in currentMirrorSystem().libraries.values) {
+    var lname;
+    try { lname = lib.uri.toString(); }
+    catch (e) { lname = MirrorSystem.getName(lib.simpleName); }
+    var inLib = <String>[];
     lib.declarations.forEach((sym, decl) {
       if (decl is ClassMirror) {
         var name = MirrorSystem.getName(decl.simpleName);
-        if (name.isNotEmpty && !name.startsWith('_')) classMirrors[name] = decl;
+        if (name.isNotEmpty && !name.startsWith('_')) {
+          classMirrors[name] = decl;
+          inLib.add(name);
+          libOfClass.putIfAbsent(name, () => lname);
+        }
       }
     });
+    if (inLib.isNotEmpty) {
+      inLib.sort();
+      classesInLib[lname] = inLib;
+      libraryNames.add(lname);
+    }
   }
+  libraryNames.sort();
   classNames = classMirrors.keys.toList()..sort();
 
   // The workspace image.
@@ -569,13 +962,20 @@ main(List<String> args) {
   var db = openImage(); db.close();   // ensure the image + table exist
 
   ui = new Ui.pane(1084, 740);
+  // Size the initial layout to the real pane (Win_surfaceSize reads the container's
+  // client rect); fall back to the defaults if it is not ready.
+  var w0 = ui.width, h0 = ui.height;
+  if (w0 > 0) paneW = w0;
+  if (h0 > 0) paneH = h0;
   ui.title('WINDART Workspace   -   a live Windows Dart IDE');
-  ui.tabs('tabs', items: tabNames, frame: <int>[0, 0, 1084, 26], onSelect: (i) => buildTab(i));
+  ui.tabs('tabs', items: tabNames, frame: <int>[0, 0, paneW, 26], onSelect: (i) => buildTab(i));
+  ui.onResize(onResizeCoalesced); // reflow on window resize (kind 7), debounced
   buildTab(0);
   ui.commit();
   uiReady();
 
   new Timer.periodic(new Duration(seconds: 1), (_) => refreshVM());
+  new Timer.periodic(new Duration(milliseconds: 150), (_) => pollMenu());   // menu/toolbar
 
   if (selftest) {
     // Pick a class with rich members for the Browser snapshot.
@@ -594,8 +994,41 @@ main(List<String> args) {
 
     var t = 400;
     new Timer(new Duration(milliseconds: t), () { switchTab(1); selectClass(richIdx); snap('tab_browser'); }); t += 450;
+    // Item 4: categorized drill-down — library -> class -> vars/methods -> source.
+    new Timer(new Duration(milliseconds: t), () {
+      switchTab(1);
+      var li = libraryNames.indexOf('dart:io');
+      if (li >= 0) selectLibrary(li);
+      print('CATBROWSE: dart:io -> ${libClasses.length} classes');
+    }); t += 450;
+    new Timer(new Duration(milliseconds: t), () {
+      var ci = libClasses.indexOf('File');
+      if (ci < 0 && libClasses.isNotEmpty) ci = 0;
+      if (ci >= 0) selectLibClass(ci);
+    }); t += 450;
+    new Timer(new Duration(milliseconds: t), () { snap('browser_categorized'); }); t += 450;
+    new Timer(new Duration(milliseconds: t), () { if (brMethods.isNotEmpty) selectBrMethod(0); }); t += 450;
+    new Timer(new Duration(milliseconds: t), () { snap('browser_member'); }); t += 450;
+    // Item 5: draggable splitter — capture the divider at rest, then after a drag.
+    new Timer(new Duration(milliseconds: t), () { switchTab(1); selectClass(richIdx); }); t += 500;
+    new Timer(new Duration(milliseconds: t), () { snap('splitter_before'); }); t += 450;
+    new Timer(new Duration(milliseconds: t), () {
+      var tk = ui.ticketOf('br_split');
+      if (tk != null) wsDragWidget(tk, 120, 0);    // drag the divider 120px right
+      print('SPLIT: dragged br_split ticket=$tk');
+    }); t += 450;
+    new Timer(new Duration(milliseconds: t), () { snap('splitter_after'); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { switchTab(0); doIt(); snap('tab_workspace'); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { switchTab(2); snap('tab_editor'); }); t += 450;
+    // Item 3: a VM class in the Editor shows the full declaration incl. real
+    // method signatures (return + parameter types), not just member names.
+    new Timer(new Duration(milliseconds: t), () {
+      switchTab(2);
+      var i = editorClassList.indexOf('Duration');
+      if (i >= 0) ui.set('ed_class', {'index': i});
+      loadEditorClass('Duration');
+    }); t += 500;
+    new Timer(new Duration(milliseconds: t), () { snap('editor_vmclass'); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { switchTab(7); refreshVM(); snap('tab_vm'); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { switchTab(3); ui.set('fd_q', {'text': 'Codec'}); ui.commit(); doFind(); snap('tab_find'); }); t += 450;
     // App: build the keypad in one tick; press + snapshot in the NEXT (a full
@@ -617,6 +1050,54 @@ main(List<String> args) {
     // stack -> frame-eval -> step -> resume -> complete), let it settle, snapshot.
     new Timer(new Duration(milliseconds: t), () { switchTab(6); debugRun(0); }); t += 1800;
     new Timer(new Duration(milliseconds: t), () { snap('tab_debug'); }); t += 450;
+    // Polish captures: FULL window (frame + menu bar + toolbar + client). Build the
+    // tab in one tick, snapshot in the NEXT (a message-loop cycle so removed widgets'
+    // areas repaint/erase before PrintWindow — no stale pixels from a taller tab).
+    new Timer(new Duration(milliseconds: t), () { dispatchMenu(202); }); t += 450;   // -> Editor (via menu id)
+    new Timer(new Duration(milliseconds: t), () {
+      var e = wsSnapshotFull('e:/windart/build/polish_editor.png');
+      print('SNAP: polish_editor ${e.isEmpty ? "OK" : "ERR:$e"}');
+    }); t += 450;
+    new Timer(new Duration(milliseconds: t), () { switchTab(1); }); t += 450;        // -> Browser (rich overview)
+    new Timer(new Duration(milliseconds: t), () {
+      var e = wsSnapshotFull('e:/windart/build/polish_overview.png');
+      print('SNAP: polish_overview ${e.isEmpty ? "OK" : "ERR:$e"}');
+    }); t += 450;
+
+    // ── Item 1 proof: fire commands through the REAL toolbar path ─────────────
+    // wsFireCommand synthesizes the exact WM_COMMAND an icon-toolbar button posts
+    // (lParam == toolbar HWND), so this exercises WndProc -> OnMenuCommand ->
+    // host queue -> pollMenu -> dispatchMenu — the whole chain, not just Dart.
+    var navA = classNames.indexOf('Duration'); if (navA < 0) navA = 0;
+    var navB = classNames.indexOf('StringBuffer');
+    if (navB < 0) navB = (classNames.length > 1 ? 1 : 0);
+    // Do-It from the toolbar: set a distinctive expression, then fire CMD_DOIT.
+    new Timer(new Duration(milliseconds: t), () {
+      switchTab(0); ui.set('ws_editor', {'text': '111 + 222'}); ui.commit();
+    }); t += 450;
+    new Timer(new Duration(milliseconds: t), () { wsFireCommand(140); pollMenu(); }); t += 450; // CMD_DOIT
+    new Timer(new Duration(milliseconds: t), () { snap('toolbar_doit'); }); t += 450;
+    // Browser Back from the toolbar: reset history, visit two classes, fire CMD_BACK.
+    new Timer(new Duration(milliseconds: t), () {
+      switchTab(1);
+      browseHistory = <int>[]; browseCursor = -1;   // deterministic proof
+      selectClass(navA); selectClass(navB);
+      print('NAV setup: A=${classNames[navA]} B=${classNames[navB]} hist=$browseHistory cur=$browseCursor');
+    }); t += 450;
+    new Timer(new Duration(milliseconds: t), () { wsFireCommand(146); pollMenu(); }); t += 450; // CMD_BACK -> class A
+    new Timer(new Duration(milliseconds: t), () { snap('toolbar_back'); }); t += 450;
+    // Home from the toolbar: fire CMD_HOME -> Browser top class.
+    new Timer(new Duration(milliseconds: t), () { wsFireCommand(145); pollMenu(); }); t += 450; // CMD_HOME
+    new Timer(new Duration(milliseconds: t), () { snap('toolbar_home'); }); t += 450;
+
+    // ── Item 2 proof: resize the real OS window; the Browser reflows to fill ──
+    new Timer(new Duration(milliseconds: t), () { switchTab(1); selectClass(navA); }); t += 450;
+    new Timer(new Duration(milliseconds: t), () { wsResizeWindow(1460, 940); }); t += 500;  // WM_SIZE -> onResize
+    new Timer(new Duration(milliseconds: t), () { snap('resize_large'); }); t += 500;
+    new Timer(new Duration(milliseconds: t), () { wsResizeWindow(820, 560); }); t += 500;
+    new Timer(new Duration(milliseconds: t), () { snap('resize_small'); }); t += 500;
+    new Timer(new Duration(milliseconds: t), () { wsResizeWindow(1100, 800); }); t += 450;  // restore
+
     new Timer(new Duration(milliseconds: t), () { print('SELFTEST: done'); hostQuit(); });
   }
   // else: stay open — a real interactive application.

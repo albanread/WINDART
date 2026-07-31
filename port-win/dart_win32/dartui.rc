@@ -1,0 +1,5 @@
+// WINDART dartui resources. The RT_MANIFEST (id 1 = the process default manifest
+// for an EXE) turns on Common-Controls v6 visual styles + per-monitor-v2 DPI.
+#include <windows.h>
+
+1 RT_MANIFEST "dartui.manifest"

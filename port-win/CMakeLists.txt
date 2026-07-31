@@ -13,6 +13,7 @@
 # arrays by port/gen_library_src_paths.py (the "nosnapshot" configuration).
 cmake_minimum_required(VERSION 3.20)
 project(windart CXX C)
+enable_language(RC)   # dartui.rc -> RT_MANIFEST (Common-Controls v6 visual styles)
 
 # 2017-era Dart targets C++11; a modern compiler's default (c++17/20) removes
 # features this code uses (dynamic exception specs, etc.). Pin C++14.
@@ -389,6 +390,7 @@ add_library(dart_win32 STATIC
   ${WIN32DIR}/win_callbacks.cpp   # WNDPROC/subclass -> ticket -> _winDispatch; key-state
   ${WIN32DIR}/win_view.cpp        # the materializer (ViewServer registry) — S4 net-new
   ${WIN32DIR}/win_canvas.cpp      # Direct2D canvas: demo draw-cmd replay + WIC PNG readback (S5)
+  ${WIN32DIR}/win_toolbar.cpp     # icon toolbar (ToolbarWindow32 + D2D icons) (polish)
   ${WIN32DIR}/gp_engine_d3d.cpp   # Direct3D 11 game-pane engine (indexed/sprite/text/shader/blit) (S6) + live present (T3)
   ${WIN32DIR}/gp_natives_win.cpp  # the gp* natives + the gpApply frame wire (S6) + SFX wire (T3)
   ${WIN32DIR}/gp_audio_win.cpp    # XAudio2 SFX playback (GpSfx) (T3)
@@ -415,8 +417,12 @@ add_executable(dartui
   ${RT}/bin/builtin_nolib.cc ${RT}/bin/builtin_natives.cc ${RT}/bin/error_exit.cc
   ${RT}/bin/main.cc ${RT}/bin/loader.cc ${RT}/bin/snapshot_utils.cc
   ${RT}/bin/observatory_assets_empty.cc ${RT}/bin/vmservice_impl.cc
-  ${GEN}/snapshot_gen.cc ${GEN}/resources_gen.cc)
+  ${GEN}/snapshot_gen.cc ${GEN}/resources_gen.cc
+  ${WIN32DIR}/dartui.rc)                    # RT_MANIFEST: Common-Controls v6 + DPI
 target_compile_definitions(dartui PRIVATE DART_UI_HOST)
+# We embed our OWN manifest via dartui.rc (RT_MANIFEST id 1); tell the linker not
+# to also auto-generate one, else CVTRES fails with "duplicate resource MANIFEST".
+target_link_options(dartui PRIVATE /MANIFEST:NO)
 set_source_files_properties(${RT}/bin/main.cc TARGET_DIRECTORY dartui
   PROPERTIES COMPILE_DEFINITIONS DART_PRECOMPILER)
 target_link_libraries(dartui PRIVATE dart_io dart_builtin dart_engine_snap dart_win32 ${WIN_SYS_LIBS})

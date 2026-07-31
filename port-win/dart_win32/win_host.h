@@ -44,6 +44,37 @@ HWND WinHostMainHwnd();
 // create surface windows/panes whose WM_COMMAND/WM_NOTIFY route to the host WndProc.
 const wchar_t* WinHostWindowClassName();
 
+// ── Menu + toolbar command ids (shared by BuildMenuBar, the toolbar, and the
+// OnMenuCommand dispatch). Host-handled ids act directly; Dart-routed ids are
+// queued for the workspace to poll (Workspace_menuPoll). Kept disjoint from the
+// materializer's widget control-ids (which start at 0x1000'0000). ──────────────
+enum WinHostCommand {
+  // File
+  CMD_NEW = 130, CMD_OPEN = 131, CMD_SAVE = 132, CMD_EXIT = 104,
+  // Edit
+  CMD_DOIT = 140, CMD_PRINTIT = 141, CMD_CUT = 142, CMD_COPY = 143, CMD_PASTE = 144,
+  // Navigation / actions (toolbar)
+  CMD_HOME = 145, CMD_BACK = 146, CMD_FORWARD = 147, CMD_REFRESH = 148,
+  CMD_FIND = 149, CMD_BROWSE = 150,
+  // Help / host
+  CMD_ABOUT = 160, CMD_RELOAD_UI = 120,
+  // View: the 9 tabs (CMD_TAB_BASE + tabIndex)
+  CMD_TAB_BASE = 200
+};
+
+// Toolbar band height (the top inset a pane container leaves for the toolbar), or
+// 0 if no toolbar was created.
+int WinHostToolbarHeight();
+
+// The icon toolbar HWND (nullptr if none). Used by Workspace_fireCommand to
+// synthesize a faithful toolbar-button WM_COMMAND (lParam == this HWND) for the
+// headless self-test of the toolbar wiring.
+HWND WinHostToolbarHwnd();
+
+// The Dart-routed menu/toolbar command queue (single UI thread; no lock needed).
+void windart_push_menu_command(int id);   // called by OnMenuCommand
+int  windart_take_menu_command();          // Workspace_menuPoll drains it; -1 = empty
+
 }  // namespace bin
 }  // namespace dart
 

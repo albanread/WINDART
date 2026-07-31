@@ -21,6 +21,7 @@ namespace bin {
 enum class WidgetKind {
   kLabel, kField, kButton, kCheckbox, kRadio, kPopup, kList, kText /*editor*/,
   kBox, kImage, kCanvas, kGame /*D3D11 game pane, T3*/, kTabs, kSlider, kProgress,
+  kSplitter /*draggable pane divider, P2*/,
   kUnknown
 };
 

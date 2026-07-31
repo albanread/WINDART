@@ -32,6 +32,10 @@ void CanvasDestroy(int64_t ticket);
 // workspace-shell headless capture (S7). Returns "" or an error.
 const char* SnapshotHwndToPng(HWND hwnd, const wchar_t* path);
 
+// Snapshot the WHOLE window incl. the non-client frame + MENU BAR (not just the
+// client area) — for the polish overview showing the menu + toolbar. "" or error.
+const char* SnapshotWindowFullToPng(HWND hwnd, const wchar_t* path);
+
 }  // namespace bin
 }  // namespace dart
 

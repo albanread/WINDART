@@ -10,7 +10,8 @@
 // send (APP_PANE_PLAN.md §5). They become additive once the framework lives.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <commctrl.h>     // SysListView32 / SysTabControl32 (S7 widget kinds)
+#include <windowsx.h>     // GET_X_LPARAM / GET_Y_LPARAM (splitter drag, P2)
+#include <commctrl.h>     // SysListView32 / SysTabControl32 (S7 widget kinds) + SetWindowSubclass
 #include <richedit.h>     // MSFTEDIT_CLASS (the code editor, S7.2)
 
 #include <cstdint>
@@ -97,6 +98,7 @@ WidgetKind ParseWidgetKind(const std::string& k) {
   if (k == "tabs") return WidgetKind::kTabs;
   if (k == "slider") return WidgetKind::kSlider;
   if (k == "progress") return WidgetKind::kProgress;
+  if (k == "splitter") return WidgetKind::kSplitter;
   return WidgetKind::kUnknown;
 }
 
@@ -107,14 +109,26 @@ ViewServer& ViewServer::Instance() {
 }
 
 Surface* ViewServer::OpenPane(int /*w*/, int /*h*/) {
-  // S4 slice: a pane's host is the main workspace window itself, so a described
-  // button becomes a direct child of it (WM_COMMAND routes to the shared WndProc,
-  // and the headless self-click's EnumChildWindows(main) finds it). A dedicated
-  // WS_CHILD host per pane is a later refinement (multi-pane layout).
+  // The pane's host is the main workspace window — UNLESS the host reserved a top
+  // band for the icon toolbar (polish), in which case we create a WS_CHILD
+  // container filling the client BELOW the toolbar and parent the app's widgets
+  // there, so they never overlap the toolbar. The container uses the shared window
+  // class, so its children's WM_COMMAND/WM_NOTIFY route to the same WndProc.
   int64_t t = next_ticket_++;
   Surface s;
   s.ticket = t;
-  s.host = WinHostMainHwnd();
+  HWND main = WinHostMainHwnd();
+  HWND host = main;
+  int top = WinHostToolbarHeight();
+  if (top > 0 && main != nullptr) {
+    RECT rc; GetClientRect(main, &rc);
+    HWND container = CreateWindowExW(0, WinHostWindowClassName(), L"",
+        WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+        0, top, rc.right - rc.left, rc.bottom - rc.top - top,
+        main, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (container != nullptr) host = container;
+  }
+  s.host = host;
   s.isWindow = false;
   Surface& ref = (surfaces_[t] = s);
   return &ref;
@@ -154,6 +168,107 @@ Widget* ViewServer::WidgetByTicket(int64_t ticket) {
 static Widget* WidgetInSurface(Surface* s, const std::string& id) {
   auto it = s->widgets.find(id);
   return it == s->widgets.end() ? nullptr : &it->second;
+}
+
+// ── Draggable splitter (P2) ──────────────────────────────────────────────────
+// A thin divider between two neighbor panes. Self-contained: the drag resizes the
+// neighbors ENTIRELY in C++ (MoveWindow), never round-tripping to Dart per mouse
+// move (the design note). It resolves its neighbors by id at drag time (from the
+// surface), so creation order and post-rebuild HWND churn don't matter. The
+// neighbors are addressed by id via the SURFACE TICKET (a Surface* would dangle if
+// surfaces_ rehashes; the ticket is stable).
+struct SplitterCtx {
+  int64_t     surfaceTicket = 0;
+  std::string leftId, rightId;   // left/top neighbor, right/bottom neighbor
+  bool        vertical = true;    // true = vertical bar, moves horizontally (IDC_SIZEWE)
+  bool        dragging = false;
+  int         grab = 0;           // cursor offset within the bar at grab time
+};
+
+static RECT ChildRectInParent(HWND child, HWND parent) {
+  RECT r; GetWindowRect(child, &r);
+  POINT tl = {r.left, r.top}, br = {r.right, r.bottom};
+  ScreenToClient(parent, &tl); ScreenToClient(parent, &br);
+  RECT out = {tl.x, tl.y, br.x, br.y};
+  return out;
+}
+
+static LRESULT CALLBACK SplitterProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                     UINT_PTR /*uid*/, DWORD_PTR ref) {
+  SplitterCtx* ctx = reinterpret_cast<SplitterCtx*>(ref);
+  switch (msg) {
+    case WM_SETCURSOR:
+      SetCursor(LoadCursorW(nullptr, ctx->vertical ? IDC_SIZEWE : IDC_SIZENS));
+      return TRUE;
+    case WM_LBUTTONDOWN:
+      SetCapture(hwnd);
+      ctx->dragging = true;
+      ctx->grab = ctx->vertical ? GET_X_LPARAM(lp) : GET_Y_LPARAM(lp);
+      return 0;
+    case WM_LBUTTONUP:
+      if (ctx->dragging) { ctx->dragging = false; ReleaseCapture(); }
+      return 0;
+    case WM_CAPTURECHANGED:
+      // Capture stolen mid-drag (Alt+Tab, a dialog/menu, screen lock). End the
+      // drag so subsequent buttonless hover-moves don't keep resizing the panes.
+      ctx->dragging = false;
+      return 0;
+    case WM_MOUSEMOVE: {
+      if (!ctx->dragging) break;
+      if (!(wp & MK_LBUTTON)) {          // button no longer down (missed up / lost capture)
+        ctx->dragging = false;
+        if (GetCapture() == hwnd) ReleaseCapture();
+        break;
+      }
+      HWND parent = GetParent(hwnd);
+      RECT sr = ChildRectInParent(hwnd, parent);
+      int sw = sr.right - sr.left, sh = sr.bottom - sr.top;
+      Surface* s = ViewServer::Instance().SurfaceByTicket(ctx->surfaceTicket);
+      Widget* lw = s ? WidgetInSurface(s, ctx->leftId) : nullptr;
+      Widget* rw = s ? WidgetInSurface(s, ctx->rightId) : nullptr;
+      RECT lr = (lw && lw->hwnd) ? ChildRectInParent(lw->hwnd, parent) : sr;
+      RECT rr = (rw && rw->hwnd) ? ChildRectInParent(rw->hwnd, parent) : sr;
+      if (ctx->vertical) {
+        int newLeft = sr.left + GET_X_LPARAM(lp) - ctx->grab;
+        int minLeft = ((lw && lw->hwnd) ? lr.left : 0) + 48;
+        int maxLeft = ((rw && rw->hwnd) ? rr.right : newLeft + sw + 48) - sw - 48;
+        if (maxLeft < minLeft) maxLeft = minLeft;  // extreme shrink: keep the left pane's min, don't invert
+        if (newLeft < minLeft) newLeft = minLeft;
+        if (newLeft > maxLeft) newLeft = maxLeft;
+        if (lw && lw->hwnd)
+          MoveWindow(lw->hwnd, lr.left, lr.top, newLeft - lr.left, lr.bottom - lr.top, TRUE);
+        if (rw && rw->hwnd) { int rx = newLeft + sw;
+          MoveWindow(rw->hwnd, rx, rr.top, rr.right - rx, rr.bottom - rr.top, TRUE); }
+        MoveWindow(hwnd, newLeft, sr.top, sw, sh, TRUE);
+      } else {
+        int newTop = sr.top + GET_Y_LPARAM(lp) - ctx->grab;
+        int minTop = ((lw && lw->hwnd) ? lr.top : 0) + 40;
+        int maxTop = ((rw && rw->hwnd) ? rr.bottom : newTop + sh + 40) - sh - 40;
+        if (maxTop < minTop) maxTop = minTop;      // extreme shrink: keep the top pane's min, don't invert
+        if (newTop < minTop) newTop = minTop;
+        if (newTop > maxTop) newTop = maxTop;
+        if (lw && lw->hwnd)
+          MoveWindow(lw->hwnd, lr.left, lr.top, lr.right - lr.left, newTop - lr.top, TRUE);
+        if (rw && rw->hwnd) { int ry = newTop + sh;
+          MoveWindow(rw->hwnd, rr.left, ry, rr.right - rr.left, rr.bottom - ry, TRUE); }
+        MoveWindow(hwnd, sr.left, newTop, sw, sh, TRUE);
+      }
+      return 0;
+    }
+    case WM_PAINT: {
+      PAINTSTRUCT ps; HDC dc = BeginPaint(hwnd, &ps);
+      RECT rc; GetClientRect(hwnd, &rc);
+      FillRect(dc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+      DrawEdge(dc, &rc, EDGE_RAISED, ctx->vertical ? (BF_LEFT | BF_RIGHT) : (BF_TOP | BF_BOTTOM));
+      EndPaint(hwnd, &ps);
+      return 0;
+    }
+    case WM_NCDESTROY:
+      RemoveWindowSubclass(hwnd, SplitterProc, 1);
+      delete ctx;
+      break;
+  }
+  return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
 void ViewServer::Close(int64_t surface) {
@@ -234,6 +349,11 @@ static std::string MaterializeAdd(ViewServer* vs, Surface* s,
                WS_BORDER | WS_TABSTOP;
       text = Utf16(MapStr(props, "text"));
       break;
+    case WidgetKind::kSplitter:                 // P2: a draggable pane divider
+      // SS_NOTIFY makes the STATIC return HTCLIENT so it receives the mouse
+      // messages the subclass proc drags with (a bare STATIC is HTTRANSPARENT).
+      cls = L"STATIC"; style |= SS_NOTIFY;
+      break;
     default:
       // Parsed, rejected cleanly (never an illegal Win32 call).
       return "unsupported widget kind: " + kind;
@@ -290,11 +410,25 @@ static std::string MaterializeAdd(ViewServer* vs, Surface* s,
     }
   }
 
+  bool w_subclassed_hint = false;
+  if (wk == WidgetKind::kSplitter) {
+    // Subclass the divider to own the drag; it resolves its neighbors by id at
+    // drag time (via the surface ticket), so creation order does not matter.
+    SplitterCtx* ctx = new SplitterCtx();
+    ctx->surfaceTicket = s->ticket;
+    ctx->leftId = MapStr(props, "left");
+    ctx->rightId = MapStr(props, "right");
+    ctx->vertical = (MapStr(props, "orientation") != "horizontal");
+    SetWindowSubclass(h, SplitterProc, 1, reinterpret_cast<DWORD_PTR>(ctx));
+    w_subclassed_hint = true;
+  }
+
   Widget w;
   w.ticket = ticket;
   w.id = id;
   w.kind = wk;
   w.hwnd = h;
+  w.subclassed = w_subclassed_hint;
   Widget& ref = (s->widgets[id] = w);
   (*by_ticket)[ticket] = &ref;   // unordered_map: refs/ptrs stable across inserts
   if (wk == WidgetKind::kCanvas) CanvasCreate(ticket, cw, ch, h);
@@ -332,6 +466,12 @@ static void DoSet(Surface* s, const std::string& id, Dart_Handle props) {
   if (w->kind == WidgetKind::kTabs && MapVal(props, "tab") != Dart_Null() &&
       Dart_IsInteger(MapVal(props, "tab"))) {
     SendMessageW(w->hwnd, TCM_SETCURSEL, (WPARAM)MapInt(props, "tab"), 0);
+    return;
+  }
+  // Programmatic combobox selection (the Editor tab's class selector).
+  if (w->kind == WidgetKind::kPopup && MapVal(props, "index") != Dart_Null() &&
+      Dart_IsInteger(MapVal(props, "index"))) {
+    SendMessageW(w->hwnd, CB_SETCURSEL, (WPARAM)MapInt(props, "index"), 0);
     return;
   }
   std::string t = MapStr(props, "title");

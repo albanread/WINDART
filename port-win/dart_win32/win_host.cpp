@@ -27,6 +27,7 @@
 #include "include/dart_api.h"
 #include "include/dart_tools_api.h"   // Dart_WorkspaceReloadSources (embedder patch)
 #include "win_callbacks.h"            // OnMenuCommand, OnSurfaceCommand/Notify routing
+#include "win_toolbar.h"              // WinToolbarCreate / WinToolbarHeight (polish)
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "comctl32.lib")
@@ -49,10 +50,29 @@ static const UINT_PTR TIMER_TICK = 1;
 // _winDispatch -> Dart closure -> print) runs with no human, then exit cleanly.
 static const UINT_PTR TIMER_SELFTEST = 2;
 
-// Menu command ids in a fixed low block (cf. win.rs:79-89). The materializer's
-// widget control-ids live in a disjoint high range (== tickets) so WM_COMMAND
-// can tell a menu pick from a button click by id range.
-static const WORD MENU_CLOSE = 101, MENU_QUIT = 104, MENU_RELOAD_UI = 120;
+// Menu command ids live in win_host.h (WinHostCommand) — shared with the toolbar
+// and the OnMenuCommand dispatch.
+
+// ── Dart-routed menu/toolbar command queue (single UI thread; no lock) ────────
+static int g_menu_q[32];
+static int g_menu_q_head = 0, g_menu_q_tail = 0;
+void windart_push_menu_command(int id) {
+  int n = (g_menu_q_tail + 1) % 32;
+  if (n != g_menu_q_head) { g_menu_q[g_menu_q_tail] = id; g_menu_q_tail = n; }
+}
+int windart_take_menu_command() {
+  if (g_menu_q_head == g_menu_q_tail) return -1;
+  int id = g_menu_q[g_menu_q_head];
+  g_menu_q_head = (g_menu_q_head + 1) % 32;
+  return id;
+}
+
+// The icon toolbar + its measured band height (0 until it exists). The pane
+// container leaves this much room at the top of the client (win_view OpenPane).
+static HWND g_toolbar = nullptr;
+static int g_toolbar_h = 0;
+int WinHostToolbarHeight() { return g_toolbar_h; }
+HWND WinHostToolbarHwnd() { return g_toolbar; }
 
 // The window handle as a raw intptr in an atomic, so NotifyUi (any thread) can
 // read it at notify time. THE BUG-FIX from win.rs:159-211: the VM spawns
@@ -196,11 +216,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
       return 0;
 
     case WM_COMMAND: {
-      // A menu pick (id in the fixed low block) or a materialized control's
-      // notification (id == ticket, high range). Route accordingly.
+      // Route by ID SPACE, not by lParam. Host commands (menu items AND icon-
+      // toolbar buttons) carry a WinHostCommand id in the fixed low block
+      // (< 0x100). A materialized control's notification carries its ticket
+      // (>= 0x100, win.dart _nextTicket), disjoint by design. The lParam gate the
+      // old code used broke the TOOLBAR: a toolbar button posts WM_COMMAND with
+      // lParam == the toolbar HWND (non-zero), so it never matched l==0 and fell
+      // through to OnSurfaceCommand, which failed closed (145 is no widget ticket).
       WORD id = LOWORD(w);
       WORD code = HIWORD(w);
-      if (l == 0 && (code == 0 || code == 1)) {   // l==0 -> menu/accelerator
+      if (id < 0x100) {                           // menu item OR toolbar button
         OnMenuCommand(id);                        // win.rs:243-246 -> dispatch_menu_command
       } else {
         // Control notification: forward to the callbacks dispatcher (win_callbacks.cpp).
@@ -213,9 +238,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
       // List-view data source / selection (LVN_GETDISPINFO, LVN_ITEMCHANGED, …).
       return OnSurfaceNotify(hwnd, reinterpret_cast<NMHDR*>(l));
 
+    case WM_CTLCOLORSTATIC:
+      // Visual styles otherwise paint STATIC labels on a grey dialog face. Draw
+      // them transparently over the window's (white) background so they blend.
+      SetBkMode(reinterpret_cast<HDC>(w), TRANSPARENT);
+      return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+
     case WM_SIZE:
-      // Keep an embedded pane/canvas filling the client area; debounce a resize
-      // event to the app (kind 7). cf. win.rs:248-258 (which sized the WebView2).
+      // On the main window: keep the toolbar spanning the top and the pane
+      // container filling the client BELOW it. The container is the sole child of
+      // main using our window class (the toolbar is TOOLBARCLASSNAME).
+      if (hwnd == WinHostMainHwnd()) {
+        int cw = LOWORD(l), ch = HIWORD(l);
+        if (g_toolbar) SendMessageW(g_toolbar, TB_AUTOSIZE, 0, 0);
+        HWND cont = FindWindowExW(hwnd, nullptr, kClassName, nullptr);
+        if (cont) MoveWindow(cont, 0, g_toolbar_h, cw, ch - g_toolbar_h, TRUE);
+      }
       OnSurfaceResize(hwnd, LOWORD(l), HIWORD(l));
       return 0;
 
@@ -233,7 +271,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
       return 0;
 
     case WM_DESTROY:
-      PostQuitMessage(0);            // win.rs:270-273
+      // Only the MAIN window's destruction quits the app — a pane container (same
+      // window class) being torn down must not PostQuitMessage.
+      if (hwnd == WinHostMainHwnd()) PostQuitMessage(0);   // win.rs:270-273
       return 0;
 
     default:
@@ -260,12 +300,38 @@ static void RegisterMainWindowClass() {
 // so one dispatch (OnMenuCommand) serves them.
 static void BuildMenuBar(HWND hwnd) {
   HMENU bar = CreateMenu();
+
   HMENU file = CreatePopupMenu();
-  AppendMenuW(file, MF_STRING, MENU_CLOSE, L"Close Window");
+  AppendMenuW(file, MF_STRING, CMD_NEW,  L"&New Class\tCtrl+N");
+  AppendMenuW(file, MF_STRING, CMD_OPEN, L"&Open\tCtrl+O");
+  AppendMenuW(file, MF_STRING, CMD_SAVE, L"&Save\tCtrl+S");
   AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(file, MF_STRING, MENU_QUIT, L"Exit");
+  AppendMenuW(file, MF_STRING, CMD_EXIT, L"E&xit");
   AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
-  // … Edit (Cut/Copy/Paste/Select All), VM (Reload UI = MENU_RELOAD_UI), Help …
+
+  HMENU edit = CreatePopupMenu();
+  AppendMenuW(edit, MF_STRING, CMD_DOIT,    L"&Do It\tCtrl+D");
+  AppendMenuW(edit, MF_STRING, CMD_PRINTIT, L"&Print It\tCtrl+P");
+  AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(edit, MF_STRING, CMD_CUT,   L"Cu&t\tCtrl+X");
+  AppendMenuW(edit, MF_STRING, CMD_COPY,  L"&Copy\tCtrl+C");
+  AppendMenuW(edit, MF_STRING, CMD_PASTE, L"&Paste\tCtrl+V");
+  AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(edit), L"&Edit");
+
+  HMENU view = CreatePopupMenu();
+  const wchar_t* tabs[] = {L"Workspace", L"Browser", L"Editor", L"Find", L"Docs",
+                           L"App", L"Debug", L"VM", L"Help"};
+  for (int i = 0; i < 9; i++)
+    AppendMenuW(view, MF_STRING, CMD_TAB_BASE + i, tabs[i]);
+  AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(view, MF_STRING, CMD_REFRESH,   L"&Refresh\tF5");
+  AppendMenuW(view, MF_STRING, CMD_RELOAD_UI, L"Reload &UI from Source");
+  AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"&View");
+
+  HMENU help = CreatePopupMenu();
+  AppendMenuW(help, MF_STRING, CMD_ABOUT, L"&About WINDART");
+  AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help), L"&Help");
+
   SetMenu(hwnd, bar);
   DrawMenuBar(hwnd);
 }
@@ -282,7 +348,9 @@ extern "C" int windart_run_ui_host(void) {
   // Register the common-control classes (BUTTON is a user32 class, but the
   // view-server will materialize SysListView32/SysTabControl32/etc. later; do it
   // once up front so the whole widget catalog is available).
-  INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES};
+  INITCOMMONCONTROLSEX icc = {sizeof(icc),
+      ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES | ICC_BAR_CLASSES |
+      ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES};   // + toolbar/tab/listview (themed)
   InitCommonControlsEx(&icc);
   LoadLibraryW(L"Msftedit.dll");   // registers the RICHEDIT50W editor class (S7.2)
 
@@ -295,6 +363,10 @@ extern "C" int windart_run_ui_host(void) {
       nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
   g_main_hwnd.store(reinterpret_cast<intptr_t>(main), std::memory_order_relaxed);
   BuildMenuBar(main);
+  // The icon toolbar band (created BEFORE the app's pane so OpenPane can inset the
+  // pane container below it). Measure its height for the inset.
+  g_toolbar = WinToolbarCreate(main);
+  g_toolbar_h = WinToolbarHeight(g_toolbar);
   ShowWindow(main, SW_SHOW);
 
   // 3. Route THIS (UI) isolate's message wakeups to our pump (cocoa_host.mm:150).

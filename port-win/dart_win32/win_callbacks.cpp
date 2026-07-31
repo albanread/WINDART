@@ -28,6 +28,7 @@
 #include "include/dart_api.h"
 #include "win_callbacks.h"
 #include "win_view.h"
+#include "win_host.h"   // WinHostCommand ids, WinHostMainHwnd, the menu queue, reload
 
 #pragma comment(lib, "comctl32.lib")
 
@@ -60,16 +61,32 @@ void Win_registerCallbackDispatch(Dart_NativeArguments args) {
   g_dispatch = Dart_NewPersistentHandle(closure);
 }
 
-// ── Menu (== win.rs:279-297 dispatch_menu_command) ──────────────────────────
+// ── Menu + toolbar command dispatch (== win.rs:279-297) ─────────────────────
+// Host-level items act directly here; Cut/Copy/Paste target the focused control
+// (no responder-chain trick — Win32 has none to need). Everything else is a
+// Dart-routed action (New/Open/Save/Do It/Print It/Refresh/tab switch): queued
+// for the workspace to poll (Workspace_menuPoll) so it runs on the UI isolate.
 void OnMenuCommand(WORD id) {
   switch (id) {
-    // Standard workspace actions named by the same strings the mac side used, so
-    // one dispatch serves them. Cut/Copy/Paste/Select-All target the focused
-    // editor directly (no responder-chain trick — Win32 has none to need;
-    // cf. cocoa_callbacks.mm:218-229).
-    // case MENU_CLOSE: PostMessageW(WinHostMainHwnd(), WM_CLOSE, 0, 0); break;
-    // case MENU_RELOAD_UI: windart_request_ui_reload(); break;
-    default: break;
+    case CMD_EXIT:
+      PostMessageW(WinHostMainHwnd(), WM_CLOSE, 0, 0);
+      break;
+    case CMD_RELOAD_UI:
+      windart_request_ui_reload();
+      break;
+    case CMD_ABOUT:
+      MessageBoxW(WinHostMainHwnd(),
+          L"WINDART — a live Windows Dart workspace.\n\n"
+          L"Dart 1.24.3 VM + JIT, native Win32 + Direct2D + Direct3D 11.\n"
+          L"VM \x00B7 GUI \x00B7 live games + audio \x00B7 the tabbed IDE \x00B7 the debugger.",
+          L"About WINDART", MB_OK | MB_ICONINFORMATION);
+      break;
+    case CMD_CUT:   { HWND f = GetFocus(); if (f) SendMessageW(f, WM_CUT, 0, 0); }   break;
+    case CMD_COPY:  { HWND f = GetFocus(); if (f) SendMessageW(f, WM_COPY, 0, 0); }  break;
+    case CMD_PASTE: { HWND f = GetFocus(); if (f) SendMessageW(f, WM_PASTE, 0, 0); } break;
+    default:
+      windart_push_menu_command(id);   // New/Open/Save/Do It/Print It/Refresh/tabs
+      break;
   }
 }
 
@@ -162,11 +179,13 @@ LRESULT OnSurfaceNotify(HWND /*host*/, NMHDR* hdr) {
 
 // ── Surface resize / close (kinds 7, 8) ─────────────────────────────────────
 void OnSurfaceResize(HWND host, int w, int h) {
+  if (WinViewInApply()) return;   // never re-enter Dart while a materialize holds handles
   Surface* s = ViewServer::Instance().SurfaceByHost(host);
   if (!s) return;
-  // Debounce, then push a resize event so the app can re-run build() with new
-  // bounds (APP_PANE_PLAN.md §7). Pack w,h into arg (or push new bounds and let
-  // the handler read surfaceSize).
+  if (w <= 0 || h <= 0) return;   // ignore minimize (0x0) — nothing to lay out
+  // Push a resize event (kind 7) so the app can re-lay-out with the new bounds.
+  // The app coalesces a burst of these (continuous border drag) on its own side
+  // (workspace.dart onResizeCoalesced), so we forward every WM_SIZE unthrottled.
   Dart_EnterScope();
   Dispatch(s->ticket, /*resize*/ 7, ((int64_t)w << 32) | (uint32_t)h);
   Dart_ExitScope();

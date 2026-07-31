@@ -18,6 +18,11 @@ List   wsVmStats()                 native "Workspace_vmStats";
 String wsRequestUiReload()         native "Workspace_requestUiReload";
 String wsUiReloadStatus()          native "Workspace_uiReloadStatus";
 String wsUiReady()                 native "Workspace_uiReady";
+int    wsMenuPoll()                native "Workspace_menuPoll";        // menu/toolbar cmd id, -1 = none
+String wsFireCommand(int id)       native "Workspace_fireCommand";     // synth toolbar WM_COMMAND (test)
+String wsResizeWindow(int w, int h) native "Workspace_resizeWindow";  // resize main window (test)
+String wsDragWidget(int ticket, int dx, int dy) native "Workspace_dragWidget"; // synth splitter drag (test)
+String wsSnapshotFull(String path) native "Workspace_snapshotFull";   // full-window PNG (menu+toolbar)
 
 // ── Debugger (T4) — the classic in-process embedder debug API, driven from the
 // Debug tab. Arm BEFORE spawning the target isolate; poll for the captured
@@ -72,6 +77,8 @@ class Ui {
   final List _cmds = <dynamic>[];             // pending batch
   final Map<String, int> _ticketOf = <String, int>{};   // id -> ticket
   final Map<int, Function> _handlers = <int, Function>{}; // ticket -> handler
+  Function _onResize;          // void f(int w, int h) — surface (kind 7) events
+  Function _onClose;           // void f()             — surface (kind 8) events
   // Tickets == Win32 child control-ids, carried in WM_COMMAND's LOWORD(wParam),
   // so they must be < 65536 and disjoint from the host's menu-command id block
   // (101..120). Start high enough to clear it.
@@ -172,6 +179,18 @@ class Ui {
   void box(String id, {String title: '', List frame}) =>
       _add('box', id, {'title': title}, frame);
 
+  /// A user-draggable pane divider (P2). `orientation` 'vertical' (a vertical bar
+  /// that moves horizontally, IDC_SIZEWE) or 'horizontal' (moves vertically,
+  /// IDC_SIZENS). `between: [leftId, rightId]` names the two neighbor widgets the
+  /// drag resizes. Dragging is handled ENTIRELY in C++ (no per-move round-trip);
+  /// the neighbors are resolved by id at drag time, so declare it after them.
+  void splitter(String id, {String orientation: 'vertical', List frame,
+                            List between: const []}) {
+    var l = between.length > 0 ? between[0] : '';
+    var r = between.length > 1 ? between[1] : '';
+    _add('splitter', id, {'orientation': orientation, 'left': l, 'right': r}, frame);
+  }
+
   /// A tab strip (S7 tab-deck bring-up). Selecting a tab dispatches onSelect(i);
   /// the chrome then clear()s + re-describes the active tab's widgets.
   void tabs(String id, {List items: const [], List frame, Function onSelect}) {
@@ -182,6 +201,14 @@ class Ui {
   /// The editor/field's current selection: [start, len, text] (S7 catalog gap 1;
   /// the Do-It-on-selection pull).
   List editorSelection(String id) => _editorSelection(_ticketOf[id]);
+
+  /// Register a surface resize handler: `f(int w, int h)` fires with the new
+  /// client size whenever the host window/pane is resized (kind 7). The handler
+  /// recomputes + re-places the layout; pending describes are auto-committed.
+  void onResize(void f(int w, int h)) { _onResize = f; }
+
+  /// Register a surface close handler (kind 8): `f()` on an explicit window close.
+  void onClose(void f()) { _onClose = f; }
 
   void set(String id, Map props)  { _cmds.add(['set', id, props]); }
   void place(String id, List xywh) { _cmds.add(['place', id, xywh]); }
@@ -257,6 +284,22 @@ dynamic _winDispatch(int ticket, int kind, int arg) {
     if (kind == 2) return (h is _ListSource) ? h.rowCount() : 0;
     return (h is _ListSource) ? h.cellAt(arg) : '';
   }
+  // Surface-level events (7 resize, 8 close) are keyed by the SURFACE ticket, not
+  // a widget's — route them to the Ui's own handlers before the per-widget lookup
+  // (which would fail closed on the surface ticket). arg for resize packs w,h.
+  if (kind == 7) {
+    var f = _activeUi._onResize;
+    if (f != null) {
+      f(arg >> 32, arg & 0xFFFFFFFF);
+      if (_activeUi.hasPending) _activeUi.commit();
+    }
+    return null;
+  }
+  if (kind == 8) {
+    var f = _activeUi._onClose;
+    if (f != null) { f(); if (_activeUi.hasPending) _activeUi.commit(); }
+    return null;
+  }
   var h = _activeUi._handlers[ticket];
   if (h == null) return null;                      // fail closed (stale ticket)
   switch (kind) {
@@ -267,7 +310,7 @@ dynamic _winDispatch(int ticket, int kind, int arg) {
     case 4:                                          // select(row/index)
       if (h is _ListSource) { h.onSelect(arg); } else { h(arg); }
       break;
-    default: return null;                           // 7 resize / 8 close (no-op here)
+    default: return null;                           // (7 resize / 8 close handled above)
   }
   // The app-pane model: a handler DESCRIBES changes (ui.set/add/...); auto-commit
   // them so the effect is visible without the app calling commit() itself.

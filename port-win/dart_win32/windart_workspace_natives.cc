@@ -6,10 +6,13 @@
 //   Workspace_reload — Dart_WorkspaceReloadSources: hot-reload a library (S3 API).
 //   Workspace_vmStats — Dart_WorkspaceVmStats: live VM counters.
 #include <cstdio>
+#include <string>
 
 #include "include/dart_api.h"
 #include "include/dart_tools_api.h"
-#include "win_host.h"   // windart_ui_ready / _request_ui_reload / _take_ui_reload_status
+#include "win_host.h"     // ui_ready / reload / the menu command queue + main HWND
+#include "win_view.h"     // ViewServer / Widget (wsDragWidget splitter drag)
+#include "win_canvas.h"   // SnapshotWindowFullToPng
 
 namespace dart {
 namespace bin {
@@ -80,6 +83,81 @@ void Workspace_uiReady(Dart_NativeArguments args) {
 void Workspace_uiReloadStatus(Dart_NativeArguments args) {
   const char* s = windart_take_ui_reload_status();
   Dart_SetReturnValue(args, Dart_NewStringFromCString(s != NULL ? s : ""));
+}
+
+// wsMenuPoll() -> int : the next queued menu/toolbar command id, or -1 if none.
+// The workspace polls this and maps ids -> actions (tab switch, Do It, image ops).
+void Workspace_menuPoll(Dart_NativeArguments args) {
+  Dart_SetReturnValue(args, Dart_NewInteger(windart_take_menu_command()));
+}
+
+// wsFireCommand(int id) -> "" : synthesize a host command exactly as the icon
+// TOOLBAR does — WM_COMMAND to the main window with LOWORD(wParam)==id and
+// lParam == the toolbar HWND (non-zero). Drives the real WndProc routing branch
+// (win_host.cpp), so the headless self-test proves the toolbar path end-to-end
+// (WndProc -> OnMenuCommand -> menu queue), not just the Dart dispatch. For a
+// Dart-routed id this only enqueues (no re-entrant Dart), so it is safe to call
+// synchronously from inside a native.
+void Workspace_fireCommand(Dart_NativeArguments args) {
+  int64_t id = 0;
+  Dart_IntegerToInt64(Dart_GetNativeArgument(args, 0), &id);
+  HWND main = WinHostMainHwnd();
+  if (main != NULL) {
+    SendMessageW(main, WM_COMMAND, MAKEWPARAM((WORD)id, 0),
+                 reinterpret_cast<LPARAM>(WinHostToolbarHwnd()));
+  }
+  Dart_SetReturnValue(args, Dart_NewStringFromCString(""));
+}
+
+// wsResizeWindow(int w, int h) -> "" : resize the MAIN window to w x h. Drives the
+// real WM_SIZE path (WndProc moves the toolbar + pane container -> the container's
+// WM_SIZE -> OnSurfaceResize -> kind-7 dispatch -> the app's onResize), so the
+// headless self-test proves resize reflow end-to-end. SetWindowPos sends WM_SIZE
+// synchronously; OnSurfaceResize's WinViewInApply guard keeps that safe.
+void Workspace_resizeWindow(Dart_NativeArguments args) {
+  int64_t w = 0, h = 0;
+  Dart_IntegerToInt64(Dart_GetNativeArgument(args, 0), &w);
+  Dart_IntegerToInt64(Dart_GetNativeArgument(args, 1), &h);
+  HWND main = WinHostMainHwnd();
+  if (main != NULL) {
+    SetWindowPos(main, NULL, 0, 0, (int)w, (int)h,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+  }
+  Dart_SetReturnValue(args, Dart_NewStringFromCString(""));
+}
+
+// wsDragWidget(int ticket, int dx, int dy) -> "" : synthesize a mouse drag on the
+// widget with this ticket (down at (3,3), move by (dx,dy), up) — the headless
+// proof for the draggable splitter. Uses the SAME WM_LBUTTONDOWN/WM_MOUSEMOVE/
+// WM_LBUTTONUP the OS sends, with lParam-carried client coords the SplitterProc
+// reads, so this drives the real drag path. Pure C++ (MoveWindow), no Dart.
+void Workspace_dragWidget(Dart_NativeArguments args) {
+  int64_t ticket = 0, dx = 0, dy = 0;
+  Dart_IntegerToInt64(Dart_GetNativeArgument(args, 0), &ticket);
+  Dart_IntegerToInt64(Dart_GetNativeArgument(args, 1), &dx);
+  Dart_IntegerToInt64(Dart_GetNativeArgument(args, 2), &dy);
+  Widget* w = ViewServer::Instance().WidgetByTicket(ticket);
+  if (w != NULL && w->hwnd != NULL) {
+    const int gx = 3, gy = 3;
+    LPARAM downLp = MAKELPARAM(gx, gy);
+    LPARAM moveLp = MAKELPARAM(gx + (int)dx, gy + (int)dy);
+    SendMessageW(w->hwnd, WM_LBUTTONDOWN, MK_LBUTTON, downLp);
+    SendMessageW(w->hwnd, WM_MOUSEMOVE, MK_LBUTTON, moveLp);
+    SendMessageW(w->hwnd, WM_LBUTTONUP, 0, moveLp);
+  }
+  Dart_SetReturnValue(args, Dart_NewStringFromCString(""));
+}
+
+// wsSnapshotFull(path) -> "" | error : PNG of the WHOLE main window (frame + menu
+// + toolbar + client) — the polish overview capture.
+void Workspace_snapshotFull(Dart_NativeArguments args) {
+  const char* path = NULL;
+  Dart_StringToCString(Dart_GetNativeArgument(args, 0), &path);
+  int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+  std::wstring wpath(n > 0 ? n - 1 : 0, L'\0');
+  if (n > 1) MultiByteToWideChar(CP_UTF8, 0, path, -1, &wpath[0], n);
+  const char* err = SnapshotWindowFullToPng(WinHostMainHwnd(), wpath.c_str());
+  Dart_SetReturnValue(args, Dart_NewStringFromCString(err != NULL ? err : ""));
 }
 
 }  // namespace bin

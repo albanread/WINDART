@@ -115,11 +115,12 @@ static void Win_surfaceApply(Dart_NativeArguments args) {
   Dart_SetReturnValue(args, Dart_NewStringFromCString(err.c_str()));
 }
 
-// _surfaceSize(int surface) -> [w, h]
+// _surfaceSize(int surface) -> [w, h] : the surface host's live client size. Lets
+// the app size its initial layout to the real pane (and read it after a resize).
 static void Win_surfaceSize(Dart_NativeArguments args) {
-  Surface* s = /* ViewServer lookup */ nullptr;
-  (void)s;
-  RECT rc = {0}; /* GetClientRect(s->host, &rc); */
+  HWND host = ViewServer::Instance().SurfaceHost(IntArg(args, 0));
+  RECT rc = {0, 0, 0, 0};
+  if (host) GetClientRect(host, &rc);
   Dart_Handle l = Dart_NewList(2);
   Dart_ListSetAt(l, 0, Dart_NewInteger(rc.right - rc.left));
   Dart_ListSetAt(l, 1, Dart_NewInteger(rc.bottom - rc.top));
@@ -316,6 +317,11 @@ void Workspace_vmStats(Dart_NativeArguments args);
 void Workspace_requestUiReload(Dart_NativeArguments args);
 void Workspace_uiReloadStatus(Dart_NativeArguments args);
 void Workspace_uiReady(Dart_NativeArguments args);
+void Workspace_menuPoll(Dart_NativeArguments args);       // polish: menu/toolbar cmd queue
+void Workspace_fireCommand(Dart_NativeArguments args);    // polish: synth toolbar WM_COMMAND (test)
+void Workspace_resizeWindow(Dart_NativeArguments args);   // polish: resize main window (test)
+void Workspace_dragWidget(Dart_NativeArguments args);     // polish: synth splitter drag (test)
+void Workspace_snapshotFull(Dart_NativeArguments args);   // polish: full-window PNG
 
 // ── Debugger primitives (windart_debug_natives.cc) — T4 ─────────────────────
 void Workspace_debugArm(Dart_NativeArguments args);
@@ -365,6 +371,11 @@ void Sqlite_query(Dart_NativeArguments args);
   V(Workspace_requestUiReload, 0)                                              \
   V(Workspace_uiReloadStatus, 0)                                               \
   V(Workspace_uiReady, 0)                                                      \
+  V(Workspace_menuPoll, 0)                                                     \
+  V(Workspace_fireCommand, 1)                                                  \
+  V(Workspace_resizeWindow, 2)                                                 \
+  V(Workspace_dragWidget, 3)                                                   \
+  V(Workspace_snapshotFull, 1)                                                 \
   V(Workspace_debugArm, 3)                                                     \
   V(Workspace_debugPoll, 0)                                                    \
   V(Workspace_debugDone, 0)                                                    \
