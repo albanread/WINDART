@@ -426,6 +426,13 @@ target_link_options(dartui PRIVATE /MANIFEST:NO)
 set_source_files_properties(${RT}/bin/main.cc TARGET_DIRECTORY dartui
   PROPERTIES COMPILE_DEFINITIONS DART_PRECOMPILER)
 target_link_libraries(dartui PRIVATE dart_io dart_builtin dart_engine_snap dart_win32 ${WIN_SYS_LIBS})
+# Stage 2: place the core snapshot .bin next to dartui.exe so it can boot from
+# disk (windart_load_snapshots_from_disk) and be swapped without a relink.
+add_custom_command(TARGET dartui POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${GEN}/vm_isolate_snapshot.bin ${GEN}/isolate_snapshot.bin
+          $<TARGET_FILE_DIR:dartui>
+  VERBATIM)
 
 # Report the compile set size at configure time.
 list(LENGTH VM_CC _n_vm)

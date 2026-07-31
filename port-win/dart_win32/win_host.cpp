@@ -23,6 +23,8 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>                    // getenv (WINDART_SELFTEST)
+#include <cstdint>                    // uint8_t (snapshot buffers, Stage 2)
+#include <cwchar>                     // wcscpy_s / wcscat_s (exe-dir path, Stage 2)
 
 #include "include/dart_api.h"
 #include "include/dart_tools_api.h"   // Dart_WorkspaceReloadSources (embedder patch)
@@ -145,6 +147,69 @@ extern "C" const char* windart_take_ui_reload_status(void) {
   std::snprintf(out, sizeof(out), "%s", g_ui_reload_status);
   g_ui_reload_status[0] = '\0';
   return out;
+}
+
+// ── Stage 2: boot the core snapshot from on-disk .bin (swappable, no relink) ──
+// dartui normally boots the snapshot baked into snapshot_gen.cc. When BOTH
+// vm_isolate_snapshot.bin and isolate_snapshot.bin sit next to the exe, load them
+// and override the snapshot pointers BEFORE Dart_Initialize, so the snapshot can
+// be regenerated without recompiling/relinking C++. ALL-OR-NOTHING: override only
+// if BOTH read fully; otherwise leave both baked (a half-swap mixes snapshots from
+// different builds and Dart_CreateIsolate rejects it). The JIT snapshots are
+// data-only, so *_instructions stay baked (NULL). The VM does not copy the
+// buffers, so they are process-lifetime (intentionally leaked). Called from
+// bin/main.cc just before Dart_Initialize (DART_UI_HOST only).
+extern const uint8_t* vm_snapshot_data;             // snapshot_gen.cc (dart::bin)
+extern const uint8_t* core_isolate_snapshot_data;   //   ""
+
+static uint8_t* WindartReadWholeFile(const wchar_t* path, DWORD* out_size) {
+  HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return nullptr;
+  LARGE_INTEGER sz;
+  if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0 || sz.QuadPart > 0x7fffffffLL) {
+    CloseHandle(h);
+    return nullptr;
+  }
+  DWORD n = static_cast<DWORD>(sz.QuadPart);
+  uint8_t* buf = static_cast<uint8_t*>(malloc(n));
+  if (buf == nullptr) { CloseHandle(h); return nullptr; }
+  DWORD off = 0, got = 0;
+  BOOL ok = TRUE;
+  while (off < n && (ok = ReadFile(h, buf + off, n - off, &got, nullptr)) != FALSE &&
+         got > 0) {
+    off += got;
+  }
+  CloseHandle(h);
+  if (ok == FALSE || off != n) { free(buf); return nullptr; }
+  *out_size = n;
+  return buf;
+}
+
+extern "C" void windart_load_snapshots_from_disk(void) {
+  wchar_t exe[MAX_PATH];
+  DWORD len = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+  if (len == 0 || len >= MAX_PATH) return;
+  while (len > 0 && exe[len - 1] != L'\\' && exe[len - 1] != L'/') len--;
+  exe[len] = L'\0';                         // strip the filename -> dir + trailing slash
+  wchar_t vmPath[MAX_PATH], isoPath[MAX_PATH];
+  wcscpy_s(vmPath, MAX_PATH, exe);   wcscat_s(vmPath, MAX_PATH, L"vm_isolate_snapshot.bin");
+  wcscpy_s(isoPath, MAX_PATH, exe);  wcscat_s(isoPath, MAX_PATH, L"isolate_snapshot.bin");
+  DWORD vmSz = 0, isoSz = 0;
+  uint8_t* vmBuf = WindartReadWholeFile(vmPath, &vmSz);
+  uint8_t* isoBuf = WindartReadWholeFile(isoPath, &isoSz);
+  if (vmBuf != nullptr && isoBuf != nullptr) {
+    vm_snapshot_data = vmBuf;
+    core_isolate_snapshot_data = isoBuf;
+    std::fprintf(stderr,
+                 "[windart] snapshot: booting from on-disk .bin (vm=%lu iso=%lu bytes)\n",
+                 static_cast<unsigned long>(vmSz), static_cast<unsigned long>(isoSz));
+  } else {
+    if (vmBuf != nullptr) free(vmBuf);
+    if (isoBuf != nullptr) free(isoBuf);
+    std::fprintf(stderr,
+                 "[windart] snapshot: using baked-in arrays (on-disk .bin absent/short)\n");
+  }
 }
 
 // Only ever called from OnWake, after Dart_HandleMessages returns — the isolate

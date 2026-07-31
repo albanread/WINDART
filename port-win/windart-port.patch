@@ -127,7 +127,7 @@
   * Timeline
 --- a/runtime/bin/main.cc
 +++ b/runtime/bin/main.cc
-@@ -1283,6 +1283,12 @@
+@@ -1283,6 +1283,17 @@
  }
  
  
@@ -137,10 +137,15 @@
 +// (which has thread affinity) is legal. From macdart-port.patch (cocoa->win).
 +extern "C" int windart_run_ui_host(void);
 +
++// Defined in dart_win32/win_host.cpp — overrides the baked-in core snapshot with
++// vm_isolate_snapshot.bin + isolate_snapshot.bin next to the exe when present
++// (Stage 2: swap the snapshot without a relink).
++extern "C" void windart_load_snapshots_from_disk(void);
++
  bool RunMainIsolate(const char* script_name, CommandLineOptions* dart_options) {
    // Call CreateIsolateAndSetup which creates an isolate and loads up
    // the specified application script.
-@@ -1450,8 +1456,19 @@
+@@ -1450,8 +1461,19 @@
                             kNumIsolateArgs, isolate_args);
        CHECK_RESULT(result);
  
@@ -160,7 +165,7 @@
        // Generate an app snapshot after execution if specified.
        if (gen_snapshot_kind == kAppJIT) {
          if (!Dart_IsCompilationError(result)) {
-@@ -1611,6 +1628,13 @@
+@@ -1611,6 +1633,13 @@
    bool print_flags_seen = false;
    bool verbose_debug_seen = false;
  
@@ -174,6 +179,21 @@
    // Perform platform specific initialization.
    if (!Platform::Initialize()) {
      Log::PrintErr("Initialization failed\n");
+@@ -1687,6 +1716,14 @@
+   TimerUtils::InitOnce();
+   EventHandler::Start();
+ 
++#if defined(DART_UI_HOST)
++  // Stage 2: boot the core snapshot from vm_isolate_snapshot.bin +
++  // isolate_snapshot.bin next to the exe (win_host.cpp) so it can be swapped
++  // without a relink; falls back to the baked-in arrays. Must run before the
++  // snapshot pointers are read into init_params below. Skipped when an app
++  // snapshot already set them.
++  if (!vm_run_app_snapshot) { windart_load_snapshots_from_disk(); }
++#endif
+   // Initialize the Dart VM.
+   Dart_InitializeParams init_params;
+   memset(&init_params, 0, sizeof(init_params));
 --- a/runtime/bin/builtin.h
 +++ b/runtime/bin/builtin.h
 @@ -29,7 +29,8 @@
