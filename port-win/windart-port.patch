@@ -1,0 +1,295 @@
+# WINDART source edits to the extracted tree (applied reproducibly by extract.py).
+# S1: platform/globals.h — version-guard 2 obsolete CRT macros.
+# S3: vm/dart_api_impl.cc + include/dart_tools_api.h — workspace hot-reload API.
+# S4: the 8 cocoa->win embedder hunks (dart:win registration + DART_UI_HOST host hook).
+#
+--- a/runtime/platform/globals.h
++++ b/runtime/platform/globals.h
+@@ -423,7 +423,10 @@
+ #endif
+ 
+ // Replace calls to strtoll with _strtoi64 on Windows.
+-#ifdef _MSC_VER
++// WINDART: only pre-VS2015 MSVC lacked a conforming strtoll. Guard so
++// MSVC 19.50 uses the real UCRT strtoll (avoids the std::_strtoi64 macro
++// collision). Mirrors c99_support_win.h's _MSC_VER<1800 gate.
++#if defined(_MSC_VER) && _MSC_VER < 1900
+ #define strtoll _strtoi64
+ #endif
+ 
+@@ -667,7 +670,13 @@
+ // On Windows the reentrent version of strtok is called
+ // strtok_s. Unify on the posix name strtok_r.
+ #if defined(HOST_OS_WINDOWS)
++// WINDART: pre-VS2015 MSVC had no conforming snprintf. On MSVC 19.50 the
++// real UCRT snprintf is correct (C99 (NULL,0)-measure returns the needed
++// length; legacy _snprintf returns -1) and mapping it breaks std::snprintf
++// via <cstdio>. Guard to pre-1900. strtok_r->strtok_s stays as-is.
++#if defined(_MSC_VER) && _MSC_VER < 1900
+ #define snprintf _snprintf
++#endif
+ #define strtok_r strtok_s
+ #endif
+ 
+--- a/runtime/vm/dart_api_impl.cc
++++ b/runtime/vm/dart_api_impl.cc
+@@ -6277,6 +6277,60 @@
+ }
+ 
+ 
++// WINDART workspace liveness: hot-reload the current isolate's sources. Re-reads
++// the root script and its imports through the tag handler, recompiles changed
++// libraries, and morphs live instances to the new class shapes (InstanceMorpher
++// + Become). Returns null on success, or an error handle whose message is the
++// reload's cancellation report. From macdart-port.patch (OS-neutral hunk).
++DART_EXPORT Dart_Handle Dart_WorkspaceReloadSources(bool force_reload) {
++  DARTSCOPE(Thread::Current());
++  Isolate* isolate = T->isolate();
++  if (!isolate->CanReload()) {
++    return Api::NewError("%s: isolate cannot reload in its current state",
++                         CURRENT_FUNC);
++  }
++  JSONStream js;
++  bool success = isolate->ReloadSources(&js, force_reload);
++  if (!success) {
++    return Api::NewError("reload cancelled: %s", js.ToCString());
++  }
++  return Api::Success();
++}
++
++
++// WINDART workspace metrics: sample this isolate's live VM counters for the
++// toolbar (see dart_tools_api.h for the layout). Read straight off the isolate's
++// heap and compiler stats — a counter the VM cannot answer stays 0.
++DART_EXPORT Dart_Handle Dart_WorkspaceVmStats(int64_t* out, intptr_t count) {
++  if ((out == NULL) || (count < kDartWorkspaceVmStatCount)) {
++    return Api::NewError("%s: expects room for %d counters", CURRENT_FUNC,
++                         kDartWorkspaceVmStatCount);
++  }
++  DARTSCOPE(Thread::Current());
++  Isolate* isolate = T->isolate();
++  Heap* heap = isolate->heap();
++  const int64_t word = kWordSize;
++
++  out[0] = heap->UsedInWords(Heap::kNew) * word;
++  out[1] = heap->CapacityInWords(Heap::kNew) * word;
++  out[2] = heap->UsedInWords(Heap::kOld) * word;
++  out[3] = heap->CapacityInWords(Heap::kOld) * word;
++  out[4] = heap->new_space()->collections();
++  out[5] = heap->old_space()->collections();
++
++  out[6] = out[7] = out[8] = 0;
++  if (FLAG_support_compiler_stats && FLAG_compiler_stats) {
++    CompilerStats* cs = isolate->aggregate_compiler_stats();
++    if (cs != NULL) {
++      out[6] = cs->num_functions_compiled;
++      out[7] = cs->num_functions_optimized;
++      out[8] = cs->total_instr_size;
++    }
++  }
++  return Api::Success();
++}
++
++
+ DART_EXPORT void Dart_GlobalTimelineSetRecordedStreams(int64_t stream_mask) {
+   if (!FLAG_support_timeline) {
+     return;
+--- a/runtime/include/dart_tools_api.h
++++ b/runtime/include/dart_tools_api.h
+@@ -911,6 +911,28 @@
+  */
+ DART_EXPORT bool Dart_IsReloading();
+ 
++/**
++ * WINDART workspace extension: hot-reload the current isolate's sources,
++ * morphing live instances to new class shapes. Returns Dart_Null() on success
++ * or an error handle (message = the reload cancellation report) on an unsafe
++ * change. \param force_reload reload even libraries the VM thinks are unchanged.
++ * From macdart-port.patch (OS-neutral hunk).
++ */
++DART_EXPORT Dart_Handle Dart_WorkspaceReloadSources(bool force_reload);
++
++/*
++ * WINDART workspace extension: sample the current isolate's live VM counters
++ * for the workspace toolbar. Fills \p out with, in order:
++ *   0 heap new used     1 heap new capacity   (bytes)
++ *   2 heap old used     3 heap old capacity   (bytes)
++ *   4 scavenges (new-space collections)       5 mark-sweeps (old-space)
++ *   6 functions compiled  7 functions optimized  8 generated code bytes
++ * Entries 6-8 are only non-zero when the VM runs with --compiler_stats.
++ * \p count must be at least kDartWorkspaceVmStatCount.
++ */
++#define kDartWorkspaceVmStatCount 9
++DART_EXPORT Dart_Handle Dart_WorkspaceVmStats(int64_t* out, intptr_t count);
++
+ /*
+  * ========
+  * Timeline
+--- a/runtime/bin/main.cc
++++ b/runtime/bin/main.cc
+@@ -1283,6 +1283,12 @@
+ }
+ 
+ 
++// Defined in dart_win32/win_host.cpp — linked into `dartui.exe` (DART_UI_HOST).
++// Owns the process main thread with a Win32 GetMessageW pump + a
++// Dart_HandleMessages() wake, so the UI isolate runs where Win32 window work
++// (which has thread affinity) is legal. From macdart-port.patch (cocoa->win).
++extern "C" int windart_run_ui_host(void);
++
+ bool RunMainIsolate(const char* script_name, CommandLineOptions* dart_options) {
+   // Call CreateIsolateAndSetup which creates an isolate and loads up
+   // the specified application script.
+@@ -1450,8 +1456,19 @@
+                            kNumIsolateArgs, isolate_args);
+       CHECK_RESULT(result);
+ 
++#if defined(DART_UI_HOST)
++      // GUI host build (`dartui`): main() was just queued as the startup
++      // message. Instead of Dart_RunLoop() (which services the isolate on a VM
++      // pool thread, where Win32 window work is illegal), run the Win32 pump on
++      // THIS thread — the process main thread — with a wake that calls
++      // Dart_HandleMessages(). See dart_win32/win_host.cpp.
++      int ui_rc = windart_run_ui_host();
++      result = (ui_rc == 0) ? Dart_Null()
++                            : Dart_NewApiError("dartui host exited non-zero");
++#else
+       // Keep handling messages until the last active receive port is closed.
+       result = Dart_RunLoop();
++#endif  // DART_UI_HOST
+       // Generate an app snapshot after execution if specified.
+       if (gen_snapshot_kind == kAppJIT) {
+         if (!Dart_IsCompilationError(result)) {
+@@ -1611,6 +1628,13 @@
+   bool print_flags_seen = false;
+   bool verbose_debug_seen = false;
+ 
++#if defined(DART_UI_HOST)
++  // The workspace toolbar reports JIT counters (functions compiled/optimized,
++  // code bytes). INC_STAT is compiled behind FLAG_compiler_stats, so enable it
++  // for the GUI build. From macdart-port.patch (cocoa->win).
++  vm_options.AddArgument("--compiler_stats");
++#endif
++
+   // Perform platform specific initialization.
+   if (!Platform::Initialize()) {
+     Log::PrintErr("Initialization failed\n");
+--- a/runtime/bin/builtin.h
++++ b/runtime/bin/builtin.h
+@@ -29,7 +29,8 @@
+   enum BuiltinLibraryId {
+     kInvalidLibrary = -1,
+     kBuiltinLibrary = 0,
+-    kIOLibrary
++    kIOLibrary,
++    kWinLibrary  // WINDART: dart:win native bridge
+   };
+ 
+   // Get source corresponding to built in library specified in 'id'.
+@@ -70,6 +71,7 @@
+   static const char* _builtin_source_paths_[];
+   static const char* io_source_paths_[];
+   static const char* io_patch_paths_[];
++  static const char* win_source_paths_[];  // WINDART: dart:win
+   static const char* html_source_paths_[];
+   static const char* html_common_source_paths_[];
+   static const char* js_source_paths_[];
+--- a/runtime/bin/builtin.cc
++++ b/runtime/bin/builtin.cc
+@@ -18,6 +18,10 @@
+     {DartUtils::kBuiltinLibURL, _builtin_source_paths_, NULL, NULL, true},
+     {DartUtils::kIOLibURL, io_source_paths_, DartUtils::kIOLibPatchURL,
+      io_patch_paths_, true},
++    // WINDART: dart:win — native Windows bridge. Index 2 == Builtin::kWinLibrary.
++    // Unconditional (linked into every binary that pulls dart_win32), as
++    // dart:cocoa was on the mac side.
++    {DartUtils::kWinLibURL, win_source_paths_, NULL, NULL, true},
+ 
+ #if defined(DART_NO_SNAPSHOT)
+     // Only include these libraries in the dart_bootstrap case for now.
+--- a/runtime/bin/builtin_nolib.cc
++++ b/runtime/bin/builtin_nolib.cc
+@@ -17,6 +17,8 @@
+     /* { url_, source_, patch_url_, patch_source_, has_natives_ } */
+     {DartUtils::kBuiltinLibURL, NULL, NULL, NULL, true},
+     {DartUtils::kIOLibURL, NULL, NULL, NULL, true},
++    // WINDART: dart:win (source from the snapshot; natives resolved here).
++    {DartUtils::kWinLibURL, NULL, NULL, NULL, true},
+ 
+     // End marker.
+     {NULL, NULL, NULL, NULL, false}};
+--- a/runtime/bin/builtin_natives.cc
++++ b/runtime/bin/builtin_natives.cc
+@@ -16,6 +16,7 @@
+ #include "bin/embedded_dart_io.h"
+ #include "bin/file.h"
+ #include "bin/io_natives.h"
++#include "win_natives.h"  // WINDART: dart:win native resolver
+ #include "bin/platform.h"
+ 
+ namespace dart {
+@@ -67,6 +68,10 @@
+   Dart_NativeFunction result =
+       IONativeLookup(name, argument_count, auto_setup_scope);
+   if (result == NULL) {
++    // WINDART: fall through to the dart:win natives.
++    result = WinNativeLookup(name, argument_count, auto_setup_scope);
++  }
++  if (result == NULL) {
+     result = Builtin_DummyNative;
+   }
+   return result;
+@@ -81,7 +86,9 @@
+       return reinterpret_cast<const uint8_t*>(entry->name_);
+     }
+   }
+-  return IONativeSymbol(nf);
++  const uint8_t* io_sym = IONativeSymbol(nf);
++  if (io_sym != NULL) return io_sym;
++  return WinNativeSymbol(nf);  // WINDART
+ }
+ 
+ 
+--- a/runtime/bin/dartutils.h
++++ b/runtime/bin/dartutils.h
+@@ -245,6 +245,7 @@
+   static const char* const kIsolateLibURL;
+   static const char* const kIOLibURL;
+   static const char* const kIOLibPatchURL;
++  static const char* const kWinLibURL;  // WINDART: dart:win
+   static const char* const kUriLibURL;
+   static const char* const kHttpScheme;
+   static const char* const kVMServiceLibURL;
+--- a/runtime/bin/dartutils.cc
++++ b/runtime/bin/dartutils.cc
+@@ -43,6 +43,7 @@
+ const char* const DartUtils::kIsolateLibURL = "dart:isolate";
+ const char* const DartUtils::kIOLibURL = "dart:io";
+ const char* const DartUtils::kIOLibPatchURL = "dart:io-patch";
++const char* const DartUtils::kWinLibURL = "dart:win";  // WINDART
+ const char* const DartUtils::kUriLibURL = "dart:uri";
+ const char* const DartUtils::kHttpScheme = "http:";
+ const char* const DartUtils::kVMServiceLibURL = "dart:vmservice";
+@@ -694,6 +695,10 @@
+   Dart_Handle io_lib = Builtin::LoadAndCheckLibrary(Builtin::kIOLibrary);
+   RETURN_IF_ERROR(io_lib);
+   Builtin::SetNativeResolver(Builtin::kIOLibrary);
++  // WINDART: dart:win — load + wire its native resolver alongside dart:io.
++  Dart_Handle win_lib = Builtin::LoadAndCheckLibrary(Builtin::kWinLibrary);
++  RETURN_IF_ERROR(win_lib);
++  Builtin::SetNativeResolver(Builtin::kWinLibrary);
+ 
+   // Setup the builtin library in a persistent handle attached the isolate
+   // specific data as we seem to lookup and use builtin lib a lot.
+--- a/runtime/bin/gen_snapshot.cc
++++ b/runtime/bin/gen_snapshot.cc
+@@ -1367,6 +1367,9 @@
+ 
+   Dart_Handle library = LoadGenericSnapshotCreationScript(Builtin::kIOLibrary);
+   CHECK_RESULT(library);
++  // WINDART: load dart:win into the snapshot isolate so it is captured too.
++  Dart_Handle win_lib = LoadGenericSnapshotCreationScript(Builtin::kWinLibrary);
++  CHECK_RESULT(win_lib);
+   Dart_Handle result = Dart_FinalizeLoading(false);
+   if (Dart_IsError(result)) {
+     const char* err_msg = Dart_GetError(library);
