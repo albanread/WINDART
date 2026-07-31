@@ -246,6 +246,12 @@ void doIt() {
   ui.commit();
 }
 
+// Smalltalk-style member side: 0 = instance (non-static), 1 = class (static
+// members + constructors/factories). The instance/class toggle filters the
+// Variables + Methods panes.
+int browserSide = 0;
+String sideName() => browserSide == 0 ? 'instance' : 'class';
+
 // The classic drill-down: Libraries | Classes | (Variables / Methods) | Source.
 // Categories are dart:mirrors libraries; each column narrows the selection.
 void buildBrowser() {
@@ -255,10 +261,12 @@ void buildBrowser() {
   var clsX = libX + libW + 8, clsW = 196;
   var memX = clsX + clsW + 8, memW = 236;
   var srcX = memX + memW + 8, srcW = W - srcX - 12;
-  var varH = ((listH - 22) * 0.42).round();     // variables pane ~top 42%
-  var methLblY = 58 + varH + 4;
-  var methY = 58 + varH + 22;
-  var methH = listH - varH - 22;                 // methods pane fills the rest
+  var memTop = 82;                                // member lists start below the toggle row
+  var memListH = listH - 24;
+  var varH = ((memListH - 22) * 0.42).round();    // variables pane ~top 42%
+  var methLblY = memTop + varH + 4;
+  var methY = memTop + varH + 22;
+  var methH = memListH - varH - 22;               // methods pane fills the rest
 
   if (currentLib.isEmpty && libraryNames.isNotEmpty) {   // default category
     currentLib = libraryNames.contains('dart:core') ? 'dart:core' : libraryNames[0];
@@ -276,10 +284,15 @@ void buildBrowser() {
   ui.splitter('br_split', orientation: 'vertical', frame: <int>[libX + libW + 2, 58, 6, listH],
       between: <String>['br_libs', 'br_classes']); track('br_split');
 
-  ui.label('br_vl', text: currentClass.isEmpty ? 'Variables' : 'Variables (${brVars.length})', frame: <int>[memX, 36, memW, 18]); track('br_vl');
-  ui.list('br_vars', frame: <int>[memX, 58, memW, varH],
+  var sn = sideName();
+  ui.label('br_vl', text: currentClass.isEmpty ? 'Variables ($sn)' : 'Variables - $sn (${brVars.length})', frame: <int>[memX, 36, memW, 18]); track('br_vl');
+  // Smalltalk-style instance/class side toggle over the Variables + Methods panes.
+  var halfW = ((memW - 4) / 2).round();
+  ui.button('br_inst', title: 'instance', frame: <int>[memX, 58, halfW, 22], onClick: () => setBrowserSide(0)); track('br_inst');
+  ui.button('br_cls', title: 'class', frame: <int>[memX + halfW + 4, 58, memW - halfW - 4, 22], onClick: () => setBrowserSide(1)); track('br_cls');
+  ui.list('br_vars', frame: <int>[memX, memTop, memW, varH],
       rowCount: () => brVars.length, cellAt: (r) => brVars[r], onSelect: selectBrVar); track('br_vars');
-  ui.label('br_ml', text: currentClass.isEmpty ? 'Methods' : 'Methods (${brMethods.length})', frame: <int>[memX, methLblY, memW, 18]); track('br_ml');
+  ui.label('br_ml', text: currentClass.isEmpty ? 'Methods ($sn)' : 'Methods - $sn (${brMethods.length})', frame: <int>[memX, methLblY, memW, 18]); track('br_ml');
   ui.list('br_meths', frame: <int>[memX, methY, memW, methH],
       rowCount: () => brMethods.length, cellAt: (r) => brMethods[r], onSelect: selectBrMethod); track('br_meths');
 
@@ -288,8 +301,8 @@ void buildBrowser() {
 
   if (currentClass.isNotEmpty) {                 // restore member panes after a rebuild
     loadVarsMethods(currentClass);
-    ui.set('br_vl', {'text': 'Variables (${brVars.length})'});
-    ui.set('br_ml', {'text': 'Methods (${brMethods.length})'});
+    ui.set('br_vl', {'text': 'Variables - ${sideName()} (${brVars.length})'});
+    ui.set('br_ml', {'text': 'Methods - ${sideName()} (${brMethods.length})'});
     ui.set('br_vars', {'rows': brVars.length});
     ui.set('br_meths', {'rows': brMethods.length});
     var src = classSketch(currentClass);
@@ -302,16 +315,35 @@ void loadVarsMethods(String cls) {
   brVars = <String>[]; brMethods = <String>[];
   var cm = classMirrors[cls];
   if (cm == null) return;
+  var wantStatic = browserSide == 1;             // class side = static members + ctors/factories
   cm.declarations.forEach((sym, d) {
-    var nm = MirrorSystem.getName(sym);
-    if (nm.isEmpty || nm.startsWith('_')) return;
-    if (d is VariableMirror) {
-      brVars.add((d.isStatic ? 'static ' : '') + (d.isFinal ? 'final ' : '') + _typeName(d.type) + ' ' + nm);
-    } else if (d is MethodMirror) {
-      brMethods.add(_methodDecl(cls, d));
-    }
+    try {
+      var nm = MirrorSystem.getName(sym);
+      if (nm.isEmpty || nm.startsWith('_')) return;
+      if (d is VariableMirror) {
+        if (d.isStatic != wantStatic) return;
+        brVars.add((d.isStatic ? 'static ' : '') + (d.isFinal ? 'final ' : '') + _typeName(d.type) + ' ' + nm);
+      } else if (d is MethodMirror) {
+        var classSide = d.isStatic || d.isConstructor;
+        if (classSide != wantStatic) return;
+        brMethods.add(_methodDecl(cls, d));
+      }
+    } catch (e) {}
   });
   brVars.sort(); brMethods.sort();
+}
+
+// Instance/Class toggle: re-filter the current class's member panes by side.
+void setBrowserSide(int side) {
+  if (browserSide == side) return;
+  browserSide = side;
+  if (currentClass.isNotEmpty) loadVarsMethods(currentClass);
+  ui.set('br_vl', {'text': currentClass.isEmpty ? 'Variables (${sideName()})' : 'Variables - ${sideName()} (${brVars.length})'});
+  ui.set('br_ml', {'text': currentClass.isEmpty ? 'Methods (${sideName()})' : 'Methods - ${sideName()} (${brMethods.length})'});
+  ui.set('br_vars', {'rows': brVars.length});
+  ui.set('br_meths', {'rows': brMethods.length});
+  ui.commit();
+  print('BROWSE side=${sideName()} -> ${brVars.length} vars, ${brMethods.length} methods');
 }
 
 // Category pane: pick a library -> repopulate the Classes pane, clear the rest.
@@ -354,8 +386,8 @@ void browseToClass(String cls) {
   }
   currentClass = cls;
   loadVarsMethods(cls);
-  ui.set('br_vl', {'text': 'Variables (${brVars.length})'});
-  ui.set('br_ml', {'text': 'Methods (${brMethods.length})'});
+  ui.set('br_vl', {'text': 'Variables - ${sideName()} (${brVars.length})'});
+  ui.set('br_ml', {'text': 'Methods - ${sideName()} (${brMethods.length})'});
   ui.set('br_vars', {'rows': brVars.length});
   ui.set('br_meths', {'rows': brMethods.length});
   var src = classSketch(cls);
@@ -1009,6 +1041,11 @@ main(List<String> args) {
     new Timer(new Duration(milliseconds: t), () { snap('browser_categorized'); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { if (brMethods.isNotEmpty) selectBrMethod(0); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { snap('browser_member'); }); t += 450;
+    // P3: instance/class side toggle — Duration has a rich class side (static
+    // consts + ctor) and a full instance side (accessors/operators/methods).
+    new Timer(new Duration(milliseconds: t), () { browseToClass('Duration'); snap('browser_instanceside'); }); t += 450;
+    new Timer(new Duration(milliseconds: t), () { setBrowserSide(1); snap('browser_classside'); }); t += 450;
+    new Timer(new Duration(milliseconds: t), () { setBrowserSide(0); }); t += 300;
     // Item 5: draggable splitter — capture the divider at rest, then after a drag.
     new Timer(new Duration(milliseconds: t), () { switchTab(1); selectClass(richIdx); }); t += 500;
     new Timer(new Duration(milliseconds: t), () { snap('splitter_before'); }); t += 450;
