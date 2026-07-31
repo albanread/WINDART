@@ -195,6 +195,133 @@ String classSketch(String name) {
   return sb.toString();
 }
 
+// ── On-disk SDK source (real bodies, not just mirror signatures) ──────────────
+// The mirror browser can only show signatures — the running VM keeps no source
+// for its snapshot classes. But the 1.24.3 SDK sources ARE on disk (the build's
+// extracted tree, or the pristine quarry), so we read the real class/method text
+// straight from the .dart files. First existing root wins, per file.
+final List<String> _sdkRoots = <String>[
+  'e:/windart/tree/sdk/lib',
+  'e:/dart_origins/sdk-1.24.3/sdk/lib',
+];
+
+String _libDir(String lib) {
+  if (lib == null || !lib.startsWith('dart:')) return '';
+  var d = lib.substring(5);
+  if (d.startsWith('_')) d = d.substring(1);       // dart:_internal -> internal
+  return d;
+}
+
+// Skip a Dart string literal (single/triple, escapes) at i; return the index past it.
+int _skipStr(String s, int i) {
+  var n = s.length, q = s.codeUnitAt(i);
+  var triple = i + 2 < n && s.codeUnitAt(i + 1) == q && s.codeUnitAt(i + 2) == q;
+  if (triple) {
+    i += 3;
+    while (i + 2 < n && !(s.codeUnitAt(i) == q && s.codeUnitAt(i + 1) == q && s.codeUnitAt(i + 2) == q)) {
+      if (s.codeUnitAt(i) == 0x5C) i++;
+      i++;
+    }
+    return (i + 2 < n) ? i + 3 : n;
+  }
+  i++;
+  while (i < n && s.codeUnitAt(i) != q && s.codeUnitAt(i) != 0x0A) {
+    if (s.codeUnitAt(i) == 0x5C) i++;
+    i++;
+  }
+  return (i < n && s.codeUnitAt(i) == q) ? i + 1 : i;
+}
+
+// Index of the '}' matching the '{' at `open`, skipping comments and strings.
+int _matchBrace(String s, int open) {
+  var n = s.length, depth = 0, i = open;
+  while (i < n) {
+    var c = s.codeUnitAt(i);
+    if (c == 0x2F && i + 1 < n) {                    // '/'
+      var d = s.codeUnitAt(i + 1);
+      if (d == 0x2F) { i += 2; while (i < n && s.codeUnitAt(i) != 0x0A) i++; continue; }
+      if (d == 0x2A) { i += 2; while (i + 1 < n && !(s.codeUnitAt(i) == 0x2A && s.codeUnitAt(i + 1) == 0x2F)) i++; i += 2; continue; }
+    }
+    if (c == 0x27 || c == 0x22) { i = _skipStr(s, i); continue; }
+    if (c == 0x7B) depth++;                          // {
+    else if (c == 0x7D) { depth--; if (depth == 0) return i; }   // }
+    i++;
+  }
+  return -1;
+}
+
+// The real on-disk source of `cls` from its dart: library file, or '' if not
+// found (a native class with no .dart, or the source tree is absent).
+String sdkClassSource(String cls) {
+  var lib = libOfClass[cls];
+  var sub = _libDir(lib);
+  if (sub.isEmpty) return '';
+  var decl = new RegExp('^[ \\t]*(abstract[ \\t]+)?class[ \\t]+' + cls + '[ \\t\\r\\n<{]', multiLine: true);
+  for (var root in _sdkRoots) {
+    var dir = new Directory('$root/$sub');
+    if (!dir.existsSync()) continue;
+    for (var ent in dir.listSync()) {
+      if (ent is! File) continue;
+      var f = ent as File;
+      var path = f.path.replaceAll('\\', '/');
+      if (!path.endsWith('.dart')) continue;
+      String text;
+      try { text = f.readAsStringSync(); } catch (e) { continue; }
+      var m = decl.firstMatch(text);
+      if (m == null) continue;
+      var start = m.start;
+      while (start < text.length) {
+        var cc = text.codeUnitAt(start);
+        if (cc == 0x20 || cc == 0x09 || cc == 0x0A || cc == 0x0D) start++; else break;
+      }
+      var open = text.indexOf('{', start);
+      if (open < 0) continue;
+      var close = _matchBrace(text, open);
+      if (close < 0) continue;
+      return '// $lib  ::  $cls        (real source: $path)\n' + text.substring(start, close + 1) + '\n';
+    }
+  }
+  return '';
+}
+
+// The search anchor for a member declaration string (get/set/operator/name).
+String _memberAnchor(String decl) {
+  var d = decl.replaceAll(';', '').trim();
+  var paren = d.indexOf('(');
+  var head = (paren < 0 ? d : d.substring(0, paren)).trim();
+  var gi = head.indexOf(' get ');
+  if (gi >= 0) return 'get ' + head.substring(gi + 5).trim();
+  var si = head.indexOf(' set ');
+  if (si >= 0) return 'set ' + head.substring(si + 5).trim();
+  var op = head.indexOf('operator ');
+  if (op >= 0) return head.substring(op).trim();
+  var parts = head.split(new RegExp('\\s+'));
+  return parts.isEmpty ? '' : parts[parts.length - 1];
+}
+
+// Best-effort: just one member's real source, sliced from its class file.
+String sdkMemberSource(String cls, String decl) {
+  var full = sdkClassSource(cls);
+  if (full.isEmpty) return '';
+  var anchor = _memberAnchor(decl);
+  if (anchor.isEmpty) return '';
+  var idx = full.indexOf(anchor);
+  if (idx < 0) return '';
+  var ls = full.lastIndexOf('\n', idx);
+  var start = ls < 0 ? 0 : ls + 1;
+  var brace = full.indexOf('{', idx);
+  var semi = full.indexOf(';', idx);
+  int end;
+  if (brace >= 0 && (semi < 0 || brace < semi)) {
+    var close = _matchBrace(full, brace);
+    end = (close < 0) ? (semi < 0 ? full.length - 1 : semi) : close;
+  } else {
+    end = (semi < 0) ? full.length - 1 : semi;
+  }
+  var head = '// $cls  ::  ' + decl.replaceAll(';', '').trim() + '   (real source)\n';
+  return head + full.substring(start, end + 1) + '\n';
+}
+
 Db openImage() {
   var db = new Db.open(imgPath);
   db.exec('CREATE TABLE IF NOT EXISTS classes(name TEXT PRIMARY KEY, source TEXT)');
@@ -305,7 +432,8 @@ void buildBrowser() {
     ui.set('br_ml', {'text': 'Methods - ${sideName()} (${brMethods.length})'});
     ui.set('br_vars', {'rows': brVars.length});
     ui.set('br_meths', {'rows': brMethods.length});
-    var src = classSketch(currentClass);
+    var real = sdkClassSource(currentClass);
+    var src = real.isNotEmpty ? real : classSketch(currentClass);
     ui.set('br_source', {'text': wr(src)});
   }
 }
@@ -390,7 +518,8 @@ void browseToClass(String cls) {
   ui.set('br_ml', {'text': 'Methods - ${sideName()} (${brMethods.length})'});
   ui.set('br_vars', {'rows': brVars.length});
   ui.set('br_meths', {'rows': brMethods.length});
-  var src = classSketch(cls);
+  var real = sdkClassSource(cls);                  // real on-disk bodies if we have them
+  var src = real.isNotEmpty ? real : classSketch(cls);
   ui.set('br_source', {'text': wr(src)});
   ui.commit();
   ui.applySpans('br_source', lexDart(src));
@@ -406,7 +535,8 @@ void selectBrVar(int r) {
 }
 void selectBrMethod(int r) {
   if (r < 0 || r >= brMethods.length) return;
-  var src = '// $currentLib  ::  $currentClass\n${brMethods[r]}\n';
+  var real = sdkMemberSource(currentClass, brMethods[r]);   // real body if on disk
+  var src = real.isNotEmpty ? real : '// $currentLib  ::  $currentClass\n${brMethods[r]}\n';
   ui.set('br_source', {'text': wr(src)}); ui.commit();
   ui.applySpans('br_source', lexDart(src));
   print('BROWSE: method ${brMethods[r]}');
@@ -489,7 +619,11 @@ String editorSourceFor(String cls) {
   if (cls == 'Counter') {
     return 'class Counter {\n  int n = 0;\n  int step = 1;\n  Counter bump() { n = n + step; return this; }\n}';
   }
-  if (classMirrors.containsKey(cls)) { loadMembers(cls); return classSketch(cls); }
+  if (classMirrors.containsKey(cls)) {
+    loadMembers(cls);
+    var real = sdkClassSource(cls);
+    return real.isNotEmpty ? real : classSketch(cls);
+  }
   return 'class $cls {\n}';
 }
 
@@ -508,14 +642,14 @@ void buildEditor() {
   var W = paneW, H = paneH;
   var srcH = H - 92 - 100;                 // editor fills, leaving room for the footer
   var acceptY = 92 + srcH + 10;
-  ui.label('ed_lbl', text: 'Editor   -   pick a class, edit its source, Accept (persists to the SQLite image + hot-reloads)', frame: <int>[12, 36, W - 24, 18]); track('ed_lbl');
+  ui.label('ed_lbl', text: 'Editor   -   pick a class, read/edit its source; Accept saves it to the SQLite image', frame: <int>[12, 36, W - 24, 18]); track('ed_lbl');
   ui.label('ed_cl_lbl', text: 'Class:', frame: <int>[12, 62, 48, 18]); track('ed_cl_lbl');
   ui.popup('ed_class', items: editorClassList, frame: <int>[64, 58, 320, 260],
       onSelect: (i) { if (i >= 0 && i < editorClassList.length) loadEditorClass(editorClassList[i]); }); track('ed_class');
   ui.editor('ed_source', frame: <int>[12, 92, W - 24, srcH]); track('ed_source');
   ui.button('ed_accept', title: 'Accept', frame: <int>[12, acceptY, 120, 28], onClick: accept); track('ed_accept');
   ui.label('ed_status', text: 'editing $currentEditClass', frame: <int>[148, acceptY + 4, W - 160, 18]); track('ed_status');
-  ui.label('ed_note', text: 'Accept writes the source to the image (survives restart) + hot-reloads. Live-instance morph: see workspace_morph.dart (S7.3).', frame: <int>[12, acceptY + 36, W - 24, 18]); track('ed_note');
+  ui.label('ed_note', text: 'Accept SAVES the source to the SQLite image (survives restart). It does NOT live-reload the running program - genuine morphing reload (imported scratch lib) is proven in workspace_morph.dart (S7.3).', frame: <int>[12, acceptY + 36, W - 24, 18]); track('ed_note');
   ui.label('ed_img', text: 'image: $imgPath', frame: <int>[12, acceptY + 62, W - 24, 18]); track('ed_img');
   var src = editorSourceFor(currentEditClass);
   ui.set('ed_source', {'text': wr(src)});
@@ -535,7 +669,7 @@ void accept() {
   ui.set('ed_status', {'text': 'Accept: persisted to image + requested reload...'});
   ui.commit();
   new Timer(new Duration(milliseconds: 300), () {
-    ui.set('ed_status', {'text': 'Accepted $currentEditClass -> image updated + reloaded ("${wsUiReloadStatus()}")'});
+    ui.set('ed_status', {'text': 'Accepted $currentEditClass -> saved to image (isolate reload ran: "${wsUiReloadStatus()}")'});
     ui.commit();
     print('ACCEPT: persisted $currentEditClass, reload = "${wsUiReloadStatus()}"');
   });
@@ -1046,6 +1180,14 @@ main(List<String> args) {
     new Timer(new Duration(milliseconds: t), () { browseToClass('Duration'); snap('browser_instanceside'); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { setBrowserSide(1); snap('browser_classside'); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { setBrowserSide(0); }); t += 300;
+    // P4: real on-disk SDK source — the Source pane shows actual bodies, not
+    // just mirror signatures. Capture the class source and one method body.
+    new Timer(new Duration(milliseconds: t), () { browseToClass('Duration'); snap('browser_realsource'); }); t += 450;
+    new Timer(new Duration(milliseconds: t), () {
+      var mi = 0;
+      for (var i = 0; i < brMethods.length; i++) { if (brMethods[i].contains('abs(')) { mi = i; break; } }
+      selectBrMethod(mi); snap('browser_realmethod');
+    }); t += 450;
     // Item 5: draggable splitter — capture the divider at rest, then after a drag.
     new Timer(new Duration(milliseconds: t), () { switchTab(1); selectClass(richIdx); }); t += 500;
     new Timer(new Duration(milliseconds: t), () { snap('splitter_before'); }); t += 450;
