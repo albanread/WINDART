@@ -789,6 +789,32 @@ void revert() {
   });
 }
 
+// W5: regenerate the boot snapshot from the VM's OWN gen_snapshot, then bake it into
+// the image as a new versioned blob (W3 @prev preserved). The world rebuilds its own
+// snapshot — no C++ build, no external tooling. Today this reproduces the core
+// snapshot (the core libs are fixed in the binary); it becomes edit-capturing once
+// core/app source moves into the image. Closes the DB-world loop:
+// gen_snapshot -> .bin -> versioned blob -> boot.
+void recreateSnapshot() {
+  var exe = Platform.resolvedExecutable;                 // ...\dartui.exe
+  var slash = exe.lastIndexOf('\\');
+  if (slash < 0) slash = exe.lastIndexOf('/');
+  var dir = exe.substring(0, slash + 1);                 // exe dir + trailing slash
+  var gen = dir + 'gen_snapshot.exe';
+  var vmBin = dir + 'vm_isolate_snapshot.bin';
+  var isoBin = dir + 'isolate_snapshot.bin';
+  print('RECREATE: running $gen (--snapshot_kind=core)');
+  var r = Process.runSync(gen, <String>['--ignore_unrecognized_flags',
+      '--snapshot_kind=core', '--vm_snapshot_data=' + vmBin,
+      '--isolate_snapshot_data=' + isoBin]);
+  print('RECREATE: gen_snapshot exit=${r.exitCode}');
+  if (r.exitCode != 0) {
+    print('RECREATE: FAILED: ${r.stderr}');
+    return;
+  }
+  print('RECREATE: ' + wsBakeSnapshot());                // fresh .bin -> versioned blob
+}
+
 final vmLabels = const ['heap new used (B)','heap new capacity (B)','heap old used (B)',
   'heap old capacity (B)','scavenges (new GC)','mark-sweeps (old GC)',
   'functions compiled','functions optimized','generated code bytes'];
@@ -1271,6 +1297,9 @@ main(List<String> args) {
   } else if (args.contains('rollback-snapshot')) {
     // W3: promote the @prev snapshot back to current (roll back the last bake).
     oneShot = () => print('ROLLBACK: ' + wsRollbackSnapshot());
+  } else if (args.contains('recreate-snapshot')) {
+    // W5: regenerate the boot snapshot via gen_snapshot, then versioned-bake it.
+    oneShot = recreateSnapshot;
   } else {
     // W2 git bridge: export <dir> projects the image to loose files; import <dir>
     // builds <dir>/world.sqlite from them (never the live image).
