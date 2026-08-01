@@ -360,3 +360,25 @@
  }
  
  
+--- a/runtime/vm/longjump.cc
++++ b/runtime/vm/longjump.cc
+@@ -64,7 +64,19 @@
+   thread->set_sticky_error(error);
+ 
+   // Destruct all the active StackResource objects.
++#if defined(_MSC_VER)
++  // WINDART: on MSVC/x64, longjmp() performs SEH stack unwinding, which itself
++  // runs the C++ destructors of the StackResource objects between here and the
++  // matching setjmp (in correct LIFO order). Calling UnwindAbove() as well would
++  // destruct them TWICE — the SEH unwind then trips ~StackResource's
++  // `ASSERT(top == this)` (allocation.cc) and ABORTS the VM on ANY scan/parse
++  // error while loading a source library (a user typo, a stray BOM, ...), turning
++  // a normally-recoverable error into a hard crash. There is no non-unwinding
++  // setjmp on x64 MSVC, so we rely on the SEH unwind alone here and DO NOT unwind
++  // manually. On POSIX longjmp does not touch dtors, so the manual unwind stands.
++#else
+   StackResource::UnwindAbove(thread, top_);
++#endif
+   longjmp(environment_, value);
+   UNREACHABLE();
+ }
