@@ -896,6 +896,106 @@ void GpTextOverlay::render(ID3D11RenderTargetView* rtv) {
 }
 
 // ============================================================================
+// GpRgbaSurface — deep-colour true-alpha draw target (above sprites, below text)
+// ============================================================================
+
+GpRgbaSurface::GpRgbaSurface(GpGfx* gfx, int w, int h, std::string* err)
+    : gfx_(gfx), w_(w), h_(h), dirty_(true), used_(false) {
+  rgba_.assign((size_t)w * h * 4, 0);            // fully transparent (inert)
+  D3D11_TEXTURE2D_DESC td = {};
+  td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+  td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  td.SampleDesc.Count = 1;
+  td.Usage = D3D11_USAGE_DYNAMIC;
+  td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+  if (FAILED(gfx_->dev->CreateTexture2D(&td, nullptr, &tex_))) {
+    if (err) *err = "gamepane: rgba surface texture create failed";
+    return;
+  }
+  gfx_->dev->CreateShaderResourceView(tex_.Get(), nullptr, &srv_);
+  ComPtr<ID3DBlob> vsb;
+  if (!MakeVS(gfx_->dev, kTextHlsl, "vs_text", vs_, &vsb, err)) return;  // sample+return
+  if (!MakePS(gfx_->dev, kTextHlsl, "ps_text", ps_, err)) return;
+}
+
+void GpRgbaSurface::clear(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+  for (size_t i = 0; i < rgba_.size(); i += 4) {
+    rgba_[i] = r; rgba_[i+1] = g; rgba_[i+2] = b; rgba_[i+3] = a;
+  }
+  dirty_ = true; used_ = true;
+}
+
+void GpRgbaSurface::pset(int64_t x, int64_t y, uint8_t r, uint8_t g, uint8_t b,
+                         uint8_t a) {
+  if (x < 0 || y < 0 || x >= w_ || y >= h_) return;
+  size_t i = ((size_t)y * w_ + x) * 4;
+  rgba_[i] = r; rgba_[i+1] = g; rgba_[i+2] = b; rgba_[i+3] = a;
+  dirty_ = true; used_ = true;
+}
+
+void GpRgbaSurface::fill_rect(int64_t x, int64_t y, int64_t w, int64_t h,
+                              uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+  for (int64_t yy = y; yy < y + h; yy++) {
+    if (yy < 0 || yy >= h_) continue;
+    for (int64_t xx = x; xx < x + w; xx++) {
+      if (xx < 0 || xx >= w_) continue;
+      size_t i = ((size_t)yy * w_ + xx) * 4;
+      rgba_[i] = r; rgba_[i+1] = g; rgba_[i+2] = b; rgba_[i+3] = a;
+    }
+  }
+  dirty_ = true; used_ = true;
+}
+
+void GpRgbaSurface::line(int64_t x0, int64_t y0, int64_t x1, int64_t y1,
+                         uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+  int64_t dx = llabs(x1 - x0), dy = -llabs(y1 - y0);
+  int64_t sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  int64_t e = dx + dy;
+  for (;;) {
+    pset(x0, y0, r, g, b, a);
+    if (x0 == x1 && y0 == y1) break;
+    int64_t e2 = 2 * e;
+    if (e2 >= dy) { e += dy; x0 += sx; }
+    if (e2 <= dx) { e += dx; y0 += sy; }
+  }
+}
+
+void GpRgbaSurface::load(const uint8_t* rgba, size_t len) {
+  size_t n = rgba_.size();
+  if (len > n) len = n;
+  memcpy(rgba_.data(), rgba, len);
+  dirty_ = true; used_ = true;
+}
+
+void GpRgbaSurface::upload() {
+  if (!dirty_) return;
+  D3D11_MAPPED_SUBRESOURCE m;
+  if (SUCCEEDED(gfx_->ctx->Map(tex_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+    for (int y = 0; y < h_; y++) {
+      memcpy((uint8_t*)m.pData + (size_t)y * m.RowPitch,
+             rgba_.data() + (size_t)y * w_ * 4, (size_t)w_ * 4);
+    }
+    gfx_->ctx->Unmap(tex_.Get(), 0);
+  }
+  dirty_ = false;
+}
+
+void GpRgbaSurface::render(ID3D11RenderTargetView* rtv) {
+  (void)rtv;
+  if (!ps_ || !used_) return;                    // inert until drawn into
+  ID3D11DeviceContext* ctx = gfx_->ctx;
+  ctx->OMSetBlendState(gfx_->blendAlpha, nullptr, 0xffffffff);   // straight src-alpha over
+  ctx->IASetInputLayout(nullptr);
+  ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  ctx->VSSetShader(vs_.Get(), nullptr, 0);
+  ctx->PSSetShader(ps_.Get(), nullptr, 0);
+  ctx->PSSetShaderResources(0, 1, srv_.GetAddressOf());
+  ctx->PSSetSamplers(0, 1, &gfx_->sampler);
+  ctx->Draw(3, 0);
+}
+
+// ============================================================================
 // GpShaderPane
 // ============================================================================
 
@@ -957,8 +1057,8 @@ GpEngine* GpEngine::instance() {
 }
 
 GpEngine::GpEngine()
-    : pane_(NULL), sprites_(NULL), blitter_(NULL), text_(NULL), shader_(NULL),
-      sfx_(NULL),
+    : pane_(NULL), sprites_(NULL), blitter_(NULL), text_(NULL), rgba_(NULL),
+      shader_(NULL), sfx_(NULL),
       fullscreen_(false), direct_(false), open_(false),
       logical_w_(0), logical_h_(0), frames_(0), last_qpc_(0), qpc_freq_(1),
       present_hwnd_(NULL), sc_w_(0), sc_h_(0) { bg_[0] = NULL; bg_[1] = NULL; }
@@ -1061,6 +1161,7 @@ int64_t GpEngine::open(int w, int h, int world_w, int world_h, bool direct,
   sprites_ = new GpSprites(&gfx_, &e);
   blitter_ = new GpBlitter();
   text_ = new GpTextOverlay(&gfx_, w, h, &e);
+  rgba_ = new GpRgbaSurface(&gfx_, w, h, &e);
   shader_ = new GpShaderPane(&gfx_);
   shader_->set_aspect((float)w / (float)h);
   open_ = true;
@@ -1081,6 +1182,7 @@ void GpEngine::close() {
   delete sprites_; sprites_ = NULL;
   delete blitter_; blitter_ = NULL;
   delete text_; text_ = NULL;
+  delete rgba_; rgba_ = NULL;
   delete shader_; shader_ = NULL;
   offscreen_rtv_.Reset();
   offscreen_srv_.Reset();
@@ -1232,6 +1334,7 @@ void GpEngine::render_present() {
   sprites_->tick(dt);
   pane_->upload();
   text_->upload();
+  rgba_->upload();
   bool has_shader = shader_->ready();
   if (has_shader) shader_->render(offscreen_rtv_.Get());
   else ctx_->ClearRenderTargetView(offscreen_rtv_.Get(), kBlack);   // clear once, up front
@@ -1240,6 +1343,7 @@ void GpEngine::render_present() {
   pane_->render(offscreen_rtv_.Get(), false);                       // indexed pixels (bg cleared above)
   sprites_->render(offscreen_rtv_.Get(), (double)pane_->scroll_x(),
                    (double)pane_->scroll_y(), (double)logical_w_, (double)logical_h_);
+  rgba_->render(offscreen_rtv_.Get());        // deep-colour RGBA overlay (above sprites)
   text_->render(offscreen_rtv_.Get());
   frames_++;
 

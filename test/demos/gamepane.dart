@@ -125,6 +125,24 @@ class GamePane {
   /// Hide layer [layer] (drops its map).
   void tileClear(int layer) => _cmds.add(<dynamic>['gptileclear', layer]);
 
+  // --- deep-colour RGBA surface (true colour + per-pixel alpha, above sprites) -
+  // A full R8G8B8A8 overlay for gradients, lighting, fades, vignettes and
+  // photographic blits — the one layer with REAL alpha (the indexed layers only
+  // do binary index-0 transparency). [a] is 0..255 (255 = opaque). Inert until
+  // drawn into. Redraw each frame like the rest of the retained scene.
+  void rgbaClear(int r, int g, int b, [int a = 255]) =>
+      _cmds.add(<dynamic>['gprgbaclear', r, g, b, a]);
+  void rgbaPixel(int x, int y, int r, int g, int b, [int a = 255]) =>
+      _cmds.add(<dynamic>['gprgbapset', x, y, r, g, b, a]);
+  void rgbaFill(int x, int y, int w, int h, int r, int g, int b, [int a = 255]) =>
+      _cmds.add(<dynamic>['gprgbafill', x, y, w, h, r, g, b, a]);
+  void rgbaLine(int x0, int y0, int x1, int y1, int r, int g, int b, [int a = 255]) =>
+      _cmds.add(<dynamic>['gprgbaline', x0, y0, x1, y1, r, g, b, a]);
+
+  /// Blit a raw RGBA image (row-major, w*h*4 bytes) into the surface at (0,0).
+  void rgbaImage(List<int> rgba) =>
+      _cmds.add(<dynamic>['gprgbaload', BASE64.encode(rgba)]);
+
   // --- HUD text (seven-segment digits; letters draw as boxes) ---------------
   void textClear() => _cmds.add(<dynamic>['gptextclear']);
   void text(int x, int y, String s, int r, int g, int b) =>

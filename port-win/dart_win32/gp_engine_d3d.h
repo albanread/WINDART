@@ -222,6 +222,37 @@ class GpTextOverlay {
   ComPtr<ID3D11PixelShader> ps_;
 };
 
+// --- deep-colour RGBA surface (RASM's true-colour draw target) ---------------
+// A first-class R8G8B8A8 layer the game draws into with FULL colour + per-pixel
+// alpha (unlike the indexed layers' binary index-0 transparency). Composited with
+// straight src-alpha over the scene, just below the text overlay — for gradients,
+// lighting, fades, vignettes, photographic blits. Fully transparent (inert) until
+// the game draws into it.
+class GpRgbaSurface {
+ public:
+  GpRgbaSurface(GpGfx* gfx, int w, int h, std::string* err);
+  void clear(uint8_t r, uint8_t g, uint8_t b, uint8_t a);       // fill the whole surface
+  void pset(int64_t x, int64_t y, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+  void fill_rect(int64_t x, int64_t y, int64_t w, int64_t h,
+                 uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+  void line(int64_t x0, int64_t y0, int64_t x1, int64_t y1,
+            uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+  void load(const uint8_t* rgba, size_t len);                   // raw RGBA blit (row-major)
+  bool used() const { return used_; }
+  void upload();
+  void render(ID3D11RenderTargetView* rtv);
+
+ private:
+  GpGfx* gfx_;
+  int w_, h_;
+  std::vector<uint8_t> rgba_;
+  bool dirty_, used_;
+  ComPtr<ID3D11Texture2D> tex_;
+  ComPtr<ID3D11ShaderResourceView> srv_;
+  ComPtr<ID3D11VertexShader> vs_;
+  ComPtr<ID3D11PixelShader> ps_;
+};
+
 // --- layer 0: the shader background -----------------------------------------
 // Compiles the game's fragment body at runtime via D3DCompile. Game bodies are
 // expected to be HLSL (GP_ENGINE_D3D_DESIGN.md §5.5); an MSL body (as the stock
@@ -264,6 +295,7 @@ class GpEngine {
   GpSprites* sprites() { return sprites_; }
   GpBlitter* blitter() { return blitter_; }
   GpTextOverlay* text() { return text_; }
+  GpRgbaSurface* rgba() { return rgba_; }
   GpShaderPane* shader() { return shader_; }
   GpTileLayer* bg(int i) { return (i >= 0 && i < 2) ? bg_[i] : nullptr; }
   GpSfx* sfx();                    // lazily started XAudio2 SFX (T3 audio)
@@ -326,6 +358,7 @@ class GpEngine {
   GpSprites* sprites_;
   GpBlitter* blitter_;
   GpTextOverlay* text_;
+  GpRgbaSurface* rgba_;             // deep-colour RGBA draw surface (above sprites)
   GpShaderPane* shader_;
   GpSfx* sfx_;                      // process-lifetime (survives game close/re-open)
 

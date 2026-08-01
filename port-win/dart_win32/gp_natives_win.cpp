@@ -260,6 +260,26 @@ void Win_gpApply(Dart_NativeArguments args) {
     } else if (strcmp(op, "gptileclear") == 0 && cn >= 2) {
       GpTileLayer* L = eng->bg((int)ElInt(c, 1));
       if (L != NULL) L->clear();
+    } else if (strcmp(op, "gprgbaclear") == 0 && cn >= 5) {
+      eng->rgba()->clear(ClampByte(ElInt(c, 1)), ClampByte(ElInt(c, 2)),
+                         ClampByte(ElInt(c, 3)), ClampByte(ElInt(c, 4)));
+    } else if (strcmp(op, "gprgbapset") == 0 && cn >= 7) {
+      eng->rgba()->pset(ElInt(c, 1), ElInt(c, 2), ClampByte(ElInt(c, 3)),
+                        ClampByte(ElInt(c, 4)), ClampByte(ElInt(c, 5)),
+                        ClampByte(ElInt(c, 6)));
+    } else if (strcmp(op, "gprgbafill") == 0 && cn >= 9) {
+      eng->rgba()->fill_rect(ElInt(c, 1), ElInt(c, 2), ElInt(c, 3), ElInt(c, 4),
+                             ClampByte(ElInt(c, 5)), ClampByte(ElInt(c, 6)),
+                             ClampByte(ElInt(c, 7)), ClampByte(ElInt(c, 8)));
+    } else if (strcmp(op, "gprgbaline") == 0 && cn >= 9) {
+      eng->rgba()->line(ElInt(c, 1), ElInt(c, 2), ElInt(c, 3), ElInt(c, 4),
+                        ClampByte(ElInt(c, 5)), ClampByte(ElInt(c, 6)),
+                        ClampByte(ElInt(c, 7)), ClampByte(ElInt(c, 8)));
+    } else if (strcmp(op, "gprgbaload") == 0 && cn >= 2) {
+      const char* b64 = ElStr(c, 1);
+      std::vector<uint8_t> bytes;
+      if (b64 == NULL || !DecodeB64(b64, &bytes)) verr = "gprgbaload: bad base64";
+      else eng->rgba()->load(bytes.data(), bytes.size());
     } else if (strcmp(op, "gptextclear") == 0) {
       eng->text()->clear();
     } else if (strcmp(op, "gptext") == 0 && cn >= 7) {
