@@ -65,6 +65,7 @@ int activeTab = 0;
 int paneW = 1084;
 int paneH = 712;
 List<String> content = <String>[];        // ids of the current tab's content widgets
+Set<String> persistentWidgets = <String>{};  // widgets that survive a tab switch (tab strip etc.)
 StringBuffer wsLog = new StringBuffer();
 final tabNames = const ['Workspace','Browser','Editor','Find','Docs','App','Debug','VM','Help'];
 
@@ -342,7 +343,14 @@ String userClassSource() {
 void track(String id) => content.add(id);
 
 void clearContent() {
-  for (var id in content) { ui.remove(id); }
+  // Remove EVERY non-persistent widget, not just the ones the per-tab `content` list
+  // captured. A user app's build() (e.g. the Calculator) may create widgets that were
+  // never tracked; if they are not destroyed here they remain as live Win32 child
+  // windows behind the next tab and repaint on hover. Iterating ui.widgetIds (kept
+  // accurate by ui.remove dropping the ticket-map entry) removes all of them.
+  for (var id in ui.widgetIds.toList()) {
+    if (!persistentWidgets.contains(id)) ui.remove(id);
+  }
   content.clear();
 }
 
@@ -1281,6 +1289,7 @@ main(List<String> args) {
   ui.title('WINDART Workspace   -   a live Windows Dart IDE');
   ui.tabs('tabs', items: tabNames, frame: <int>[0, 0, paneW, 26], onSelect: (i) => buildTab(i));
   ui.onResize(onResizeCoalesced); // reflow on window resize (kind 7), debounced
+  persistentWidgets = ui.widgetIds.toSet();  // the tab strip (+ any chrome) survives switches
   buildTab(0);
   ui.commit();
   uiReady();
@@ -1451,10 +1460,11 @@ main(List<String> args) {
     new Timer(new Duration(milliseconds: t), () { switchTab(6); }); t += 350;   // Debug
     new Timer(new Duration(milliseconds: t), () { switchTab(5); }); t += 350;   // App AGAIN
     new Timer(new Duration(milliseconds: t), () {
-      switchTab(6); snap('tab_revisit');   // Debug — must be clean
+      switchTab(1);                        // -> Browser (gappy: any keypad bleed shows)
       var kcount = ui.widgetIds.where((s) => s.length >= 1 && s[0] == 'k').length;
-      print('REVISIT: keypad widgets after leaving App = $kcount (0 = truly destroyed, not hidden)');
-    }); t += 450;
+      print('REVISIT: keypad widgets after leaving App = $kcount (0 = destroyed, not hidden)');
+    }); t += 250;
+    new Timer(new Duration(milliseconds: t), () { snap('tab_revisit'); }); t += 450;  // Browser — must be clean
     new Timer(new Duration(milliseconds: t), () { switchTab(4); selectDocsClass(docIdx); snap('tab_docs'); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { switchTab(8); snap('tab_help'); }); t += 450;
     // Debug: open the tab, run one scripted debug session (breakpoint -> pause ->
