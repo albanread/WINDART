@@ -1166,8 +1166,8 @@ void buildPlaceholder(int i) {
 // The plug-in-app-off-the-UI-isolate model: the game runs in a spawned isolate that
 // flushes ['draw', cmds] frames over a port; we gpOpen on the first `gpopen` command,
 // then gpApply each frame and pull-pace the next. Mirrors test/game_live.dart.
-final gpGames = const ['13_invaders', '13_invaders_hlsl', '15_brickout', '12_copper', 'tiletest', 'fonttest', 'abc'];
-String gameSel = '13_invaders';
+final gpGames = const ['coindash', '13_invaders', '13_invaders_hlsl', '15_brickout', '12_copper', 'tiletest', 'rgbatest', 'fonttest', 'abc'];
+String gameSel = 'coindash';
 const int gpW = 424, gpH = 240;              // logical game size (the engine letterboxes)
 ReceivePort gameRp;
 SendPort gameCtl;
