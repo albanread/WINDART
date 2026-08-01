@@ -1043,29 +1043,41 @@ String _dbgRenderSource() {
 void buildDebug() {
   if (dbgSource.isEmpty) _dbgLoadSource();
   dbgPausedLine = -1;
+  // Responsive layout: source editor fills the left column down to the button row
+  // (pinned to the bottom); the stack / eval / transcript fill the right column.
+  var W = paneW, H = paneH;
+  var leftW = (W * 0.56).round();
+  var rightX = leftW + 24, rightW = W - rightX - 12;
+  var btnY = H - 44;                       // button row + status pinned to the bottom
+  var srcH = btnY - 84 - 8;                // editor: y=84 down to just above the buttons
+
   ui.label('db_lbl', text: 'Debug   -   in-process debugger (classic embedder API) on a spawned target isolate',
-      frame: <int>[12, 36, 1040, 18]); track('db_lbl');
+      frame: <int>[12, 36, W - 24, 18]); track('db_lbl');
   ui.label('db_target', text: 'target: debug_target.dart      breakpoint: line $kDbgBreakLine (int factorial)      * = breakpoint   > = paused line',
-      frame: <int>[12, 58, 1040, 18]); track('db_target');
+      frame: <int>[12, 58, W - 24, 18]); track('db_target');
 
-  ui.editor('db_src', frame: <int>[12, 84, 620, 500]); track('db_src');
-  ui.button('db_over', title: 'Run / Step Over', frame: <int>[12, 592, 130, 28], onClick: () => debugRun(0)); track('db_over');
-  ui.button('db_into', title: 'Step Into', frame: <int>[150, 592, 96, 28], onClick: () => debugRun(1)); track('db_into');
-  ui.button('db_out', title: 'Step Out', frame: <int>[254, 592, 96, 28], onClick: () => debugRun(2)); track('db_out');
-  ui.button('db_resume', title: 'Resume', frame: <int>[358, 592, 96, 28], onClick: () => debugRun(3)); track('db_resume');
+  ui.editor('db_src', frame: <int>[12, 84, leftW, srcH]); track('db_src');
+  ui.button('db_over', title: 'Run / Step Over', frame: <int>[12, btnY, 130, 28], onClick: () => debugRun(0)); track('db_over');
+  ui.button('db_into', title: 'Step Into', frame: <int>[150, btnY, 96, 28], onClick: () => debugRun(1)); track('db_into');
+  ui.button('db_out', title: 'Step Out', frame: <int>[254, btnY, 96, 28], onClick: () => debugRun(2)); track('db_out');
+  ui.button('db_resume', title: 'Resume', frame: <int>[358, btnY, 96, 28], onClick: () => debugRun(3)); track('db_resume');
 
-  ui.label('db_sl', text: 'Call stack (top frame first)', frame: <int>[644, 60, 428, 18]); track('db_sl');
-  ui.list('db_stack', frame: <int>[644, 82, 428, 220],
+  var stackH = ((btnY - 82) * 0.42).round();
+  ui.label('db_sl', text: 'Call stack (top frame first)', frame: <int>[rightX, 60, rightW, 18]); track('db_sl');
+  ui.list('db_stack', frame: <int>[rightX, 82, rightW, stackH],
       rowCount: () => dbgStackLines.length, cellAt: (r) => dbgStackLines[r], onSelect: (r) {}); track('db_stack');
 
-  ui.label('db_el', text: 'Evaluate in frame:', frame: <int>[644, 312, 130, 18]); track('db_el');
-  ui.field('db_eval', text: 'n * n', frame: <int>[776, 310, 200, 24]); track('db_eval');
-  ui.label('db_evalout', text: '(result appears here)', frame: <int>[644, 340, 428, 18]); track('db_evalout');
+  var evalY = 82 + stackH + 12;
+  ui.label('db_el', text: 'Evaluate in frame:', frame: <int>[rightX, evalY, 130, 18]); track('db_el');
+  ui.field('db_eval', text: 'n * n', frame: <int>[rightX + 132, evalY - 2, rightW - 132, 24]); track('db_eval');
+  ui.label('db_evalout', text: '(result appears here)', frame: <int>[rightX, evalY + 28, rightW, 18]); track('db_evalout');
 
-  ui.label('db_ll', text: 'Session transcript', frame: <int>[644, 368, 300, 18]); track('db_ll');
-  ui.editor('db_log', frame: <int>[644, 390, 428, 194]); track('db_log');
+  var logLY = evalY + 56;
+  var logTop = logLY + 22;
+  ui.label('db_ll', text: 'Session transcript', frame: <int>[rightX, logLY, rightW, 18]); track('db_ll');
+  ui.editor('db_log', frame: <int>[rightX, logTop, rightW, btnY - logTop - 8]); track('db_log');
   ui.label('db_status', text: 'click Run / Step Over to start a debug session',
-      frame: <int>[644, 592, 428, 18]); track('db_status');
+      frame: <int>[rightX, btnY + 4, rightW, 18]); track('db_status');
 
   ui.set('db_src', {'text': wr(_dbgRenderSource())});
   ui.commit();
