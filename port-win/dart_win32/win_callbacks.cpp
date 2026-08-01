@@ -138,6 +138,9 @@ LRESULT OnSurfaceNotify(HWND /*host*/, NMHDR* hdr) {
   if (w->kind == WidgetKind::kTabs) {
     if (hdr->code == TCN_SELCHANGE) {
       int idx = (int)SendMessageW(w->hwnd, TCM_GETCURSEL, 0, 0);
+      // Show the page FIRST, so the content the app rebuilds in response lands on the
+      // now-active page (its parent). Then notify the app (kind 4 -> buildTab).
+      ViewServer::Instance().ShowTabPage(GetParent(w->hwnd), idx);
       Dart_EnterScope();
       Dispatch(w->ticket, /*select*/ 4, idx);
       Dart_ExitScope();
@@ -183,6 +186,7 @@ void OnSurfaceResize(HWND host, int w, int h) {
   Surface* s = ViewServer::Instance().SurfaceByHost(host);
   if (!s) return;
   if (w <= 0 || h <= 0) return;   // ignore minimize (0x0) — nothing to lay out
+  ViewServer::Instance().ResizeTabPages(host, w, h);   // fit pages before the app reflows
   // Push a resize event (kind 7) so the app can re-lay-out with the new bounds.
   // The app coalesces a burst of these (continuous border drag) on its own side
   // (workspace.dart onResizeCoalesced), so we forward every WM_SIZE unthrottled.

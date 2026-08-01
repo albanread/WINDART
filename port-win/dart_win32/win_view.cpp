@@ -294,6 +294,28 @@ void ViewServer::ClearSurface(Surface* s) {
 }
 
 // ── the one materialize verb: 'add' ─────────────────────────────────────────
+// The parent a content widget is created under: the ACTIVE tab page when the surface
+// has tab pages, else the container itself. Frames stay container-relative because
+// each page fills the container (origin 0,0).
+static HWND ContentParent(Surface* s) {
+  if (!s->tab_pages.empty() && s->active_tab >= 0 &&
+      s->active_tab < static_cast<int>(s->tab_pages.size()))
+    return s->tab_pages[s->active_tab];
+  return s->host;
+}
+
+// Select tab page i: show it, hide the rest, keep the strip on top. The strip's own
+// highlighted tab is set by the OS (a click) or TCM_SETCURSEL (programmatic) — this
+// only drives page visibility, which is what stops inactive tabs bleeding.
+static void SwitchTabPage(Surface* s, int i) {
+  if (!s || i < 0 || i >= static_cast<int>(s->tab_pages.size())) return;
+  for (int j = 0; j < static_cast<int>(s->tab_pages.size()); j++)
+    ShowWindow(s->tab_pages[j], j == i ? SW_SHOW : SW_HIDE);
+  s->active_tab = i;
+  if (s->tab_ctrl)
+    SetWindowPos(s->tab_ctrl, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+}
+
 static std::string MaterializeAdd(ViewServer* vs, Surface* s,
                                   const std::string& kind, const std::string& id,
                                   int64_t ticket, Dart_Handle props,
@@ -362,8 +384,11 @@ static std::string MaterializeAdd(ViewServer* vs, Surface* s,
   bool sized = (wk == WidgetKind::kCanvas || wk == WidgetKind::kGame);
   int cw = sized ? (int)MapInt(props, "w") : 10;
   int ch = sized ? (int)MapInt(props, "h") : 10;
+  // The tab strip lives on the container; every other widget lives on the ACTIVE tab
+  // page, so page show/hide governs visibility (no bleed, resize for free).
+  HWND parent = (wk == WidgetKind::kTabs) ? s->host : ContentParent(s);
   HWND h = CreateWindowExW(0, cls, text.c_str(), style,
-                           0, 0, cw > 0 ? cw : 10, ch > 0 ? ch : 10, s->host,
+                           0, 0, cw > 0 ? cw : 10, ch > 0 ? ch : 10, parent,
                            reinterpret_cast<HMENU>(static_cast<UINT_PTR>(ticket)),
                            GetModuleHandleW(nullptr), nullptr);
   if (!h) return "CreateWindowExW failed for id=" + id;
@@ -407,6 +432,24 @@ static std::string MaterializeAdd(ViewServer* vs, Surface* s,
           SendMessageW(h, TCM_INSERTITEMW, (WPARAM)i, reinterpret_cast<LPARAM>(&ti));
         }
       }
+    }
+    if (wk == WidgetKind::kTabs) {
+      // One native page window per tab item, filling the container; only page 0 is
+      // shown. Content widgets parent to the active page (ContentParent), so an
+      // inactive tab's controls are hidden and cannot bleed. Kept behind the strip
+      // in z-order so the tab buttons stay visible.
+      RECT rc; GetClientRect(s->host, &rc);
+      for (intptr_t i = 0; i < n; i++) {
+        HWND page = CreateWindowExW(
+            0, WinHostWindowClassName(), L"",
+            WS_CHILD | WS_CLIPCHILDREN | (i == 0 ? WS_VISIBLE : 0),
+            0, 0, rc.right, rc.bottom, s->host, nullptr,
+            GetModuleHandleW(nullptr), nullptr);
+        SetWindowPos(page, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        s->tab_pages.push_back(page);
+      }
+      s->tab_ctrl = h;
+      s->active_tab = 0;
     }
   }
 
@@ -465,7 +508,9 @@ static void DoSet(Surface* s, const std::string& id, Dart_Handle props) {
   // rebuilds the content itself.
   if (w->kind == WidgetKind::kTabs && MapVal(props, "tab") != Dart_Null() &&
       Dart_IsInteger(MapVal(props, "tab"))) {
-    SendMessageW(w->hwnd, TCM_SETCURSEL, (WPARAM)MapInt(props, "tab"), 0);
+    int idx = (int)MapInt(props, "tab");
+    SendMessageW(w->hwnd, TCM_SETCURSEL, (WPARAM)idx, 0);
+    SwitchTabPage(s, idx);   // show that page + hide the rest (programmatic select)
     return;
   }
   // Programmatic combobox selection (the Editor tab's class selector).
@@ -540,6 +585,17 @@ void ViewServer::ForgetTicket(int64_t ticket) { by_ticket_.erase(ticket); }
 HWND ViewServer::SurfaceHost(int64_t surface) {
   Surface* s = SurfaceByTicket(surface);
   return s ? s->host : nullptr;
+}
+
+// Tab pages — the callback layer (win_callbacks.cpp) drives these on a tab click /
+// container resize; SwitchTabPage does the show/hide.
+void ViewServer::ShowTabPage(HWND host, int i) {
+  SwitchTabPage(SurfaceByHost(host), i);
+}
+void ViewServer::ResizeTabPages(HWND host, int w, int h) {
+  Surface* s = SurfaceByHost(host);
+  if (!s) return;
+  for (HWND page : s->tab_pages) MoveWindow(page, 0, 0, w, h, TRUE);
 }
 
 // The first canvas widget's ticket in a surface (0 if none) — backs the unified

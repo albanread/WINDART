@@ -43,6 +43,14 @@ struct Surface {
   bool    isWindow = false;    // 'win' vs 'pane'
   int64_t gen = 0;             // generation, for discarding stale applies
   std::unordered_map<std::string, Widget> widgets;   // id -> widget
+  // Native tab pages: one child window per tab item, filling `host`. The tab strip
+  // (SysTabControl32) sits on top; content widgets are parented to the ACTIVE page,
+  // and switching tabs shows one page + hides the rest. So an inactive tab's controls
+  // physically cannot paint (no bleed) and reposition on resize for free — the OS
+  // owns page visibility instead of the app clearing a shared surface.
+  HWND tab_ctrl = nullptr;
+  std::vector<HWND> tab_pages;   // one per tab item; index == tab index
+  int  active_tab = 0;
 };
 
 // The global registry. UI-thread only (single-threaded, no lock needed — unlike
@@ -73,6 +81,12 @@ class ViewServer {
   // tickets — Win32 controls are OWNED, unlike AppKit's weakly-held targets, so a
   // bare map-clear (cocoa.dart:156-158) would leak windows.
   void ClearSurface(Surface* s);
+
+  // Native tab pages. ShowTabPage selects/shows one page (hides the rest) after a
+  // tab click; ResizeTabPages fits every page to a resized container. Both no-op on
+  // a surface without a tab control. See Surface::tab_pages.
+  void ShowTabPage(HWND host, int i);
+  void ResizeTabPages(HWND host, int w, int h);
 
  private:
   int64_t next_ticket_ = 0x1000'0000;   // high range: keeps widget ids disjoint
