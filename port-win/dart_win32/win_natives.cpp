@@ -168,6 +168,26 @@ static void Win_editorSelection(Dart_NativeArguments args) {
   Dart_SetReturnValue(args, out);
 }
 
+// _editorSelectLine(int ticket, int line) -> void — select (highlight) a 0-based
+// line in an EDIT/RichEdit. EM_LINEINDEX/EM_LINELENGTH count the control's own
+// \r\n breaks (so the caller passes a plain line number, not a char offset). Used
+// by the syntax-check gate to highlight the offending line on a rejected Accept;
+// SetFocus makes the selection visible even though the Accept button was just
+// clicked (a standard EDIT hides its selection when unfocused).
+static void Win_editorSelectLine(Dart_NativeArguments args) {
+  Widget* wdg = ViewServer::Instance().WidgetByTicket(IntArg(args, 0));
+  int line = (int)IntArg(args, 1);
+  if (wdg && wdg->hwnd && line >= 0) {
+    LRESULT idx = SendMessageW(wdg->hwnd, EM_LINEINDEX, (WPARAM)line, 0);
+    if (idx >= 0) {
+      LRESULT len = SendMessageW(wdg->hwnd, EM_LINELENGTH, (WPARAM)idx, 0);
+      SetFocus(wdg->hwnd);
+      SendMessageW(wdg->hwnd, EM_SETSEL, (WPARAM)idx, (LPARAM)(idx + len));
+      SendMessageW(wdg->hwnd, EM_SCROLLCARET, 0, 0);
+    }
+  }
+}
+
 // _measureText(String s, String fontSpec) -> [w, h]  (DirectWrite metrics; S5).
 static void Win_measureText(Dart_NativeArguments args) {
   // DWrite: CreateTextLayout -> GetMetrics. Skeleton.
@@ -313,6 +333,7 @@ void Win_keyState(Dart_NativeArguments args);                  // cf. :498
 // ── Workspace primitives — REUSED AS-IS (workspace_natives.cc, OS-neutral) ──
 void Workspace_eval(Dart_NativeArguments args);                // cocoa_natives.mm:481
 void Workspace_reload(Dart_NativeArguments args);
+void Workspace_checkSyntax(Dart_NativeArguments args);         // validate-before-save
 void Workspace_vmStats(Dart_NativeArguments args);
 void Workspace_requestUiReload(Dart_NativeArguments args);
 void Workspace_uiReloadStatus(Dart_NativeArguments args);
@@ -343,6 +364,7 @@ void Sqlite_query(Dart_NativeArguments args);
   V(Win_surfaceSize, 1)                                                        \
   V(Win_widgetText, 1)                                                         \
   V(Win_editorSelection, 1)                                                    \
+  V(Win_editorSelectLine, 2)                                                   \
   V(Win_measureText, 2)                                                        \
   V(Win_openFileDialog, 1)                                                     \
   V(Win_saveFileDialog, 1)                                                     \
@@ -367,6 +389,7 @@ void Sqlite_query(Dart_NativeArguments args);
   V(Win_keyState, 0)                                                           \
   V(Workspace_eval, 1)                                                         \
   V(Workspace_reload, 0)                                                       \
+  V(Workspace_checkSyntax, 2)                                                  \
   V(Workspace_vmStats, 0)                                                      \
   V(Workspace_requestUiReload, 0)                                              \
   V(Workspace_uiReloadStatus, 0)                                               \

@@ -686,6 +686,27 @@ void accept() {
   var sel = ui.editorSelection('ed_source');
   var src = sel[2].toString().replaceAll('\r\n', '\n').replaceAll('\r', '\n').trim();
   var isUser = userClassNames.contains(currentEditClass);
+  // Validate-before-save (syntax-check-first): compile the edit in isolation; only
+  // clean source is written to the image + reloaded, so the reload never sees
+  // uncompilable source (a bad reload's finalize would kill the isolate). Logical/
+  // runtime errors are a separate matter — found by running, not by this scan.
+  if (isUser) {
+    var err = wsCheckSyntax(src, currentEditClass);
+    if (err.isNotEmpty) {
+      // Dart reports "'usercheck:N': error: line L pos P: msg\n  <src line>\n  ^".
+      // Strip the internal URI to the bare location + message, and highlight the
+      // offending line in the editor (SetFocus + select via editorSelectLine).
+      var loc = new RegExp(r'line (\d+) pos (\d+): (.*)').firstMatch(err);
+      var head = (loc != null)
+          ? 'line ${loc.group(1)} pos ${loc.group(2)}: ${loc.group(3)}'
+          : err.replaceAll('\r', ' ').replaceAll('\n', ' ');
+      ui.set('ed_status', {'text': 'REJECTED - $currentEditClass: $head'});
+      ui.commit();
+      if (loc != null) ui.editorSelectLine('ed_source', int.parse(loc.group(1)) - 1);
+      print('ACCEPT REJECTED (syntax): $currentEditClass: $head');
+      return;   // do NOT write the image or reload
+    }
+  }
   var db = openImage();
   if (isUser) {
     db.exec('CREATE TABLE IF NOT EXISTS userlib(name TEXT PRIMARY KEY, source TEXT)', const []);
@@ -1263,6 +1284,16 @@ main(List<String> args) {
       accept();   // -> image + user_lib.dart -> reload -> morph; accept reads liveState after 350ms
     }); t += 950;
     new Timer(new Duration(milliseconds: t), () { snap('editor_morph'); }); t += 450;
+    // Validated gate (syntax-check-first): a BAD edit is REJECTED before any write
+    // or reload — wsCheckSyntax catches it, so the live instance AND the DB are
+    // untouched and the next boot stays safe.
+    new Timer(new Duration(milliseconds: t), () {
+      ui.set('ed_source', {'text': wr('class Counter {\n  int n = 0\n  this is not valid dart\n}')});
+      ui.commit();
+      currentEditClass = 'Counter';
+      accept();   // -> wsCheckSyntax rejects; no DB write, no reload
+    }); t += 600;
+    new Timer(new Duration(milliseconds: t), () { snap('editor_reject'); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { switchTab(7); refreshVM(); snap('tab_vm'); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { switchTab(3); ui.set('fd_q', {'text': 'Codec'}); ui.commit(); doFind(); snap('tab_find'); }); t += 450;
     // App: build the keypad in one tick; press + snapshot in the NEXT (a full

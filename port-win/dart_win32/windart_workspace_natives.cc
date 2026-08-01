@@ -58,6 +58,56 @@ void Workspace_reload(Dart_NativeArguments args) {
   Dart_SetReturnValue(args, Dart_NewStringFromCString(""));
 }
 
+// wsCheckSyntax(String src) -> String : "" if `src` compiles as a library, else the
+// compile-error message ("... error: line N pos M: ..."). Validate-before-save: the
+// workspace calls this BEFORE writing a user class to the image + reloading, so the
+// reload never sees source that won't compile (a bad reload's internal finalize
+// PROPAGATES the error and kills the UI isolate). Loads the source into a throwaway
+// `usercheck:` URI (created post-boot, so it never appears in the Browser's class
+// walk) and finalizes it; Dart_LoadLibrary + Dart_FinalizeLoading are embedder APIs
+// that RETURN the error (unlike the reload's internal finalize). Relies on the MSVC
+// longjmp fix (runtime/vm/longjump.cc) so a scan/parse error reports, not aborts.
+void Workspace_checkSyntax(Dart_NativeArguments args) {
+  const char* src = NULL;
+  Dart_StringToCString(Dart_GetNativeArgument(args, 0), &src);
+  const char* cname = NULL;
+  Dart_StringToCString(Dart_GetNativeArgument(args, 1), &cname);
+  static int64_t counter = 0;
+  char uri[64];
+  snprintf(uri, sizeof(uri), "usercheck:%lld", static_cast<long long>(++counter));
+  Dart_Handle url = Dart_NewStringFromCString(uri);
+  Dart_Handle source = Dart_NewStringFromCString(src != NULL ? src : "");
+  Dart_Handle lib = Dart_LoadLibrary(url, url, source, 0, 0);
+  if (Dart_IsError(lib)) {
+    Dart_SetReturnValue(args, Dart_NewStringFromCString(Dart_GetError(lib)));
+    return;
+  }
+  Dart_Handle fin = Dart_FinalizeLoading(false);
+  if (Dart_IsError(fin)) {
+    Dart_SetReturnValue(args, Dart_NewStringFromCString(Dart_GetError(fin)));
+    return;
+  }
+  // Force class-BODY finalization (parse fields + method signatures) via a COMPILED
+  // expression that instantiates the class. Compiling `new X()` finalizes X and
+  // reports the REAL syntax error ("... error: line N pos M: ...") — the same
+  // message a normal load gives — whereas the embedder Dart_New masks it as
+  // "could not find constructor". A bare Dart_LoadLibrary + Dart_FinalizeLoading
+  // only marks the library loaded and leaves its classes to finalize lazily.
+  // The compile of `new X()` FAILS before the constructor body runs, so a syntax
+  // error is caught without executing user logic. (Method BODIES stay lazy; a
+  // body/runtime error is a separate matter, found by running.) NOTE: the MVP
+  // path needs a default (no-arg) constructor; a class without one is validated
+  // via a throwaway isolate later.
+  char expr[160];
+  snprintf(expr, sizeof(expr), "new %s()", (cname != NULL) ? cname : "");
+  Dart_Handle ev = Dart_EvaluateExpr(lib, Dart_NewStringFromCString(expr));
+  if (Dart_IsError(ev)) {
+    Dart_SetReturnValue(args, Dart_NewStringFromCString(Dart_GetError(ev)));
+    return;
+  }
+  Dart_SetReturnValue(args, Dart_NewStringFromCString(""));   // compiles cleanly
+}
+
 // wsVmStats() -> List<int>. This isolate's live VM counters (S3 primitive).
 void Workspace_vmStats(Dart_NativeArguments args) {
   int64_t v[kDartWorkspaceVmStatCount];

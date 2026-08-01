@@ -14,6 +14,7 @@ library dart.win;
 int    processId()                 native "Win_getpid";
 String wsEval(String src)          native "Workspace_eval";
 String wsReload()                  native "Workspace_reload";
+String wsCheckSyntax(String src, String className) native "Workspace_checkSyntax";
 List   wsVmStats()                 native "Workspace_vmStats";
 String wsRequestUiReload()         native "Workspace_requestUiReload";
 String wsUiReloadStatus()          native "Workspace_uiReloadStatus";
@@ -40,6 +41,7 @@ String _surfaceApply(int surface, int gen, List cmds) native "Win_surfaceApply";
 List   _surfaceSize(int surface)                      native "Win_surfaceSize";
 String _widgetText(int ticket)                        native "Win_widgetText";
 List   _editorSelection(int ticket)                   native "Win_editorSelection";
+void   _editorSelectLine(int ticket, int line)        native "Win_editorSelectLine";
 List   _measureText(String s, String font)            native "Win_measureText";
 void   _editorApplySpans(int ticket, List runs)       native "Win_editorApplySpans";
 
@@ -201,6 +203,9 @@ class Ui {
   /// The editor/field's current selection: [start, len, text] (S7 catalog gap 1;
   /// the Do-It-on-selection pull).
   List editorSelection(String id) => _editorSelection(_ticketOf[id]);
+  /// Select (highlight) a 0-based line in an editor — used to point at the line a
+  /// rejected Accept failed on (the syntax-check gate).
+  void editorSelectLine(String id, int line) => _editorSelectLine(_ticketOf[id], line);
 
   /// Register a surface resize handler: `f(int w, int h)` fires with the new
   /// client size whenever the host window/pane is resized (kind 7). The handler
