@@ -1268,6 +1268,9 @@ main(List<String> args) {
     // W1: bake the on-disk snapshot .bin into the image; the NEXT boot loads it
     // from the DB blob (win_host fallback chain).
     oneShot = () => print('BAKE: ' + wsBakeSnapshot());
+  } else if (args.contains('rollback-snapshot')) {
+    // W3: promote the @prev snapshot back to current (roll back the last bake).
+    oneShot = () => print('ROLLBACK: ' + wsRollbackSnapshot());
   } else {
     // W2 git bridge: export <dir> projects the image to loose files; import <dir>
     // builds <dir>/world.sqlite from them (never the live image).

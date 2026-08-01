@@ -223,6 +223,15 @@ void Workspace_bakeSnapshot(Dart_NativeArguments args) {
   Dart_SetReturnValue(args, Dart_NewStringFromCString(msg));
 }
 
+// wsRollbackSnapshot() -> String status. Promotes the @prev snapshot back to current
+// (W3 boot-critical rollback); the next boot loads the previous snapshot.
+extern "C" int windart_rollback_snapshot(char* msg, int msgSz);
+void Workspace_rollbackSnapshot(Dart_NativeArguments args) {
+  char msg[256];
+  windart_rollback_snapshot(msg, static_cast<int>(sizeof(msg)));
+  Dart_SetReturnValue(args, Dart_NewStringFromCString(msg));
+}
+
 // W2 (export/import-world): the git bridge, in windart_world_io.cc (host layer,
 // binary-safe — the Dart sqlite binding is text-only). extern "C": unmangled.
 extern "C" int windart_export_world(const char* outDir, char* msg, int msgSz);

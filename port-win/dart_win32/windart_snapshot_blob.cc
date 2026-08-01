@@ -147,6 +147,16 @@ extern "C" int windart_bake_snapshots_to_image(char* msg, int msgSz) {
   sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS blobs(key TEXT PRIMARY KEY, kind TEXT, data BLOB)",
                NULL, NULL, NULL);
   sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
+  // W3: preserve the outgoing snapshot as @prev (the last-good to roll back to)
+  // before overwriting it. No-op on the first bake (nothing to preserve yet).
+  sqlite3_exec(db,
+               "INSERT OR REPLACE INTO blobs(key, kind, data) "
+               "SELECT 'snapshot:vm@prev', kind, data FROM blobs WHERE key='snapshot:vm'",
+               NULL, NULL, NULL);
+  sqlite3_exec(db,
+               "INSERT OR REPLACE INTO blobs(key, kind, data) "
+               "SELECT 'snapshot:isolate@prev', kind, data FROM blobs WHERE key='snapshot:isolate'",
+               NULL, NULL, NULL);
   int rc = WindartWriteBlob(db, "snapshot:vm", vmBuf, static_cast<int>(vmSz));
   if (rc == SQLITE_OK)
     rc = WindartWriteBlob(db, "snapshot:isolate", isoBuf, static_cast<int>(isoSz));
@@ -160,5 +170,47 @@ extern "C" int windart_bake_snapshots_to_image(char* msg, int msgSz) {
   }
   snprintf(msg, msgSz, "baked snapshot -> image blobs (vm=%lu iso=%lu bytes)",
            static_cast<unsigned long>(vmSz), static_cast<unsigned long>(isoSz));
+  return 0;
+}
+
+// W3: roll the snapshot back to @prev (the last-good preserved by the previous bake).
+// Promotes snapshot:*@prev -> snapshot:* so the NEXT boot loads the previous snapshot.
+// Returns 0 + a status in msg; nonzero (with a message) if there is no @prev.
+extern "C" int windart_rollback_snapshot(char* msg, int msgSz) {
+  char path[1024];
+  if (!WindartImagePath(path, sizeof(path))) {
+    snprintf(msg, msgSz, "rollback: no USERPROFILE");
+    return 1;
+  }
+  sqlite3* db = NULL;
+  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
+    if (db != NULL) sqlite3_close(db);
+    snprintf(msg, msgSz, "rollback: cannot open image");
+    return 1;
+  }
+  int havePrev = 0;
+  sqlite3_stmt* st = NULL;
+  if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM blobs WHERE key='snapshot:vm@prev'",
+                         -1, &st, NULL) == SQLITE_OK) {
+    if (sqlite3_step(st) == SQLITE_ROW) havePrev = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+  }
+  if (havePrev == 0) {
+    sqlite3_close(db);
+    snprintf(msg, msgSz, "rollback: no @prev snapshot to roll back to");
+    return 1;
+  }
+  sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
+  sqlite3_exec(db,
+               "INSERT OR REPLACE INTO blobs(key, kind, data) "
+               "SELECT 'snapshot:vm', kind, data FROM blobs WHERE key='snapshot:vm@prev'",
+               NULL, NULL, NULL);
+  sqlite3_exec(db,
+               "INSERT OR REPLACE INTO blobs(key, kind, data) "
+               "SELECT 'snapshot:isolate', kind, data FROM blobs WHERE key='snapshot:isolate@prev'",
+               NULL, NULL, NULL);
+  sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+  sqlite3_close(db);
+  snprintf(msg, msgSz, "rolled back snapshot -> @prev promoted to current (reboot to load it)");
   return 0;
 }

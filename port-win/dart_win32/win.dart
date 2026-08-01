@@ -16,6 +16,7 @@ String wsEval(String src)          native "Workspace_eval";
 String wsReload()                  native "Workspace_reload";
 String wsCheckSyntax(String src, String className) native "Workspace_checkSyntax";
 String wsBakeSnapshot()            native "Workspace_bakeSnapshot";
+String wsRollbackSnapshot()        native "Workspace_rollbackSnapshot";
 String wsExportWorld(String dir)                 native "Workspace_exportWorld";
 String wsImportWorld(String inDir, String outDb) native "Workspace_importWorld";
 List   wsVmStats()                 native "Workspace_vmStats";

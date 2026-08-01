@@ -189,6 +189,33 @@ static bool WindartSnapshotCompatible(const unsigned char* cand, unsigned int ca
   return memcmp(cand + H, baked + H, static_cast<size_t>(ci - H)) == 0;
 }
 
+// Try one (vm, isolate) blob pair from the image: read both, and if both are present
+// AND version-compatible with this build, override the snapshot pointers and return
+// true. Compared against the baked arrays (untouched until an override succeeds), so
+// a failed pair leaves them baked for the next attempt. W3: the loader tries the
+// current pair, then the @prev (last-good) pair, so a bad current snapshot falls back
+// to the previous one instead of aborting.
+static bool WindartTryBlobPair(const char* vmKey, const char* isoKey,
+                               const char* label) {
+  unsigned int vSz = 0, iSz = 0;
+  unsigned char* vBlob = windart_read_snapshot_blob(vmKey, &vSz);
+  unsigned char* iBlob = windart_read_snapshot_blob(isoKey, &iSz);
+  if (vBlob != nullptr && iBlob != nullptr &&
+      WindartSnapshotCompatible(vBlob, vSz, vm_snapshot_data) &&
+      WindartSnapshotCompatible(iBlob, iSz, core_isolate_snapshot_data)) {
+    vm_snapshot_data = vBlob;            // process-lifetime (VM does not copy)
+    core_isolate_snapshot_data = iBlob;
+    std::fprintf(
+        stderr,
+        "[windart] snapshot: booting from DB image blob (%s) (vm=%u iso=%u bytes)\n",
+        label, vSz, iSz);
+    return true;
+  }
+  if (vBlob != nullptr) free(vBlob);
+  if (iBlob != nullptr) free(iBlob);
+  return false;
+}
+
 static uint8_t* WindartReadWholeFile(const wchar_t* path, DWORD* out_size) {
   HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -214,27 +241,13 @@ static uint8_t* WindartReadWholeFile(const wchar_t* path, DWORD* out_size) {
 }
 
 extern "C" void windart_load_snapshots_from_disk(void) {
-  // 1) The world: boot the snapshot from the SQLite image `blobs` table, if BOTH
-  //    blobs are present AND version-compatible with this build. (Same all-or-
-  //    nothing rule as the .bin path — a half/mismatched swap would abort.)
-  {
-    unsigned int vSz = 0, iSz = 0;
-    unsigned char* vBlob = windart_read_snapshot_blob("snapshot:vm", &vSz);
-    unsigned char* iBlob = windart_read_snapshot_blob("snapshot:isolate", &iSz);
-    if (vBlob != nullptr && iBlob != nullptr &&
-        WindartSnapshotCompatible(vBlob, vSz, vm_snapshot_data) &&
-        WindartSnapshotCompatible(iBlob, iSz, core_isolate_snapshot_data)) {
-      vm_snapshot_data = vBlob;            // process-lifetime (VM does not copy)
-      core_isolate_snapshot_data = iBlob;
-      std::fprintf(
-          stderr,
-          "[windart] snapshot: booting from DB image blob (vm=%u iso=%u bytes)\n",
-          vSz, iSz);
-      return;
-    }
-    if (vBlob != nullptr) free(vBlob);     // absent/stale -> fall back to the .bin
-    if (iBlob != nullptr) free(iBlob);
-  }
+  // 1) The world: boot the snapshot from the SQLite image `blobs` table. Try the
+  //    current pair first, then the @prev (last-good) pair — a bad/stale current
+  //    snapshot falls back to the previous one (W3) instead of aborting. Each try is
+  //    ALL-OR-NOTHING + version-guarded (a half/mismatched swap would abort).
+  if (WindartTryBlobPair("snapshot:vm", "snapshot:isolate", "current")) return;
+  if (WindartTryBlobPair("snapshot:vm@prev", "snapshot:isolate@prev", "last-good"))
+    return;
   // 2) Stage 2: the two on-disk .bin next to the exe.
   wchar_t exe[MAX_PATH];
   DWORD len = GetModuleFileNameW(nullptr, exe, MAX_PATH);
