@@ -313,3 +313,21 @@
    Dart_Handle result = Dart_FinalizeLoading(false);
    if (Dart_IsError(result)) {
      const char* err_msg = Dart_GetError(library);
+--- a/runtime/vm/scanner.cc
++++ b/runtime/vm/scanner.cc
+@@ -72,6 +72,15 @@
+   c0_pos_.line = 1;
+   c0_pos_.column = 0;
+   ReadChar();
++  // WINDART: tolerate a leading UTF-8 BOM (U+FEFF) at the start of a source unit.
++  // 1.24.3's scanner otherwise faults on it during load (a StackResource
++  // re-entrancy that aborts at allocation.cc:37), which broke importing any
++  // BOM-carrying source file. A BOM is a fact of life for hand-edited and
++  // DB-materialized source, so skip it here — one place all source funnels
++  // through — and every source unit loads whether or not it carries the mark.
++  if (c0_ == 0xFEFF) {
++    ReadChar();
++  }
+ }
+ 
+ 

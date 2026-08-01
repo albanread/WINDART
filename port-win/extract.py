@@ -115,7 +115,7 @@ def apply_windart_patch() -> None:
         raise RuntimeError('GNU `patch` not found on PATH - run extract.py from git-bash')
     with open(PATCH, 'rb') as fh:
         subprocess.run([patch_exe, '-p1', '-d', DEST], stdin=fh, check=True)
-    log(f'applied windart-port.patch (11 files) via {os.path.basename(patch_exe)}')
+    log(f'applied windart-port.patch (12 files) via {os.path.basename(patch_exe)}')
 
 
 def count_ext(root_rel: str, ext: str) -> int:
