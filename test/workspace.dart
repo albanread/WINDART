@@ -67,7 +67,7 @@ int paneH = 712;
 List<String> content = <String>[];        // ids of the current tab's content widgets
 Set<String> persistentWidgets = <String>{};  // widgets that survive a tab switch (tab strip etc.)
 StringBuffer wsLog = new StringBuffer();
-final tabNames = const ['Workspace','Browser','Editor','Find','Docs','App','Debug','VM','Help'];
+final tabNames = const ['Workspace','Browser','Editor','Find','Docs','App','Debug','VM','Help','Game'];
 
 Map<String, ClassMirror> classMirrors = <String, ClassMirror>{};
 List<String> classNames = <String>[];
@@ -1162,7 +1162,80 @@ void buildPlaceholder(int i) {
       frame: <int>[12, 98, 1040, 18]); track('ph_note2');
 }
 
+// ── Game tab (D3D11 game pane): run a gp game in its OWN isolate ──────────────
+// The plug-in-app-off-the-UI-isolate model: the game runs in a spawned isolate that
+// flushes ['draw', cmds] frames over a port; we gpOpen on the first `gpopen` command,
+// then gpApply each frame and pull-pace the next. Mirrors test/game_live.dart.
+final gpGames = const ['13_invaders', '13_invaders_hlsl', '15_brickout', '12_copper', 'abc'];
+String gameSel = '13_invaders';
+const int gpW = 424, gpH = 240;              // logical game size (the engine letterboxes)
+ReceivePort gameRp;
+SendPort gameCtl;
+Isolate gameIso;
+bool gameOpened = false, gameDone = false;
+int gameFrames = 0;
+
+void gameTick() { if (gameCtl != null && !gameDone) gameCtl.send(<dynamic>[<dynamic>[], 0]); }
+void gameSchedule() {
+  if (!gameDone && activeTab == 9) new Timer(new Duration(milliseconds: 16), gameTick);
+}
+
+void stopGame() {
+  gameDone = true;
+  if (gameRp != null) { gameRp.close(); gameRp = null; }
+  gameCtl = null;
+  if (gameIso != null) { try { gameIso.kill(priority: Isolate.immediate); } catch (e) {} gameIso = null; }
+  if (gameOpened) { gpClose(); gameOpened = false; }
+}
+
+void startGame(String name) {
+  stopGame();
+  gameSel = name;
+  gameDone = false; gameOpened = false; gameFrames = 0;
+  var rp = new ReceivePort();
+  gameRp = rp;
+  rp.listen((msg) {
+    if (gameDone || rp != gameRp || msg is! List || msg.isEmpty) return;   // stale/late frame
+    if (msg[0] == 'port') { gameCtl = msg[1]; gameTick(); return; }
+    if (msg[0] != 'draw') return;
+    var cmds = msg[1];
+    if (!gameOpened) {
+      var first = (cmds is List && cmds.isNotEmpty && cmds[0] is List && cmds[0].isNotEmpty) ? cmds[0][0] : null;
+      if (first == 'gpopen') {
+        var o = cmds[0];
+        gpOpen(o[1], o[2], o[3], o[4], 0);
+        gameOpened = true;
+        gameSchedule();
+        return;                                   // the gpopen frame just opens; invite the next
+      }
+      gpOpen(gpW, gpH, gpW, gpH, 0);
+      gameOpened = true;
+    }
+    gpApply(cmds);                                // apply + render_present + swapchain Present
+    gameFrames++;
+    gameSchedule();
+  });
+  Isolate.spawnUri(Uri.parse('demos/$name.dart'), <String>['$gpW', '$gpH'], rp.sendPort)
+      .then((iso) { gameIso = iso; })
+      .catchError((e) { print('GAME: spawn error $name: $e'); });
+}
+
+void buildGame() {
+  var W = paneW, H = paneH;
+  ui.label('gm_lbl', text: 'Game   -   pick a game; it runs in its OWN isolate, flushing frames to the D3D11 pane',
+      frame: <int>[12, 36, W - 24, 18]); track('gm_lbl');
+  ui.list('gm_list', frame: <int>[12, 60, 180, H - 96],
+      rowCount: () => gpGames.length, cellAt: (r) => gpGames[r],
+      onSelect: (r) { if (r >= 0 && r < gpGames.length) startGame(gpGames[r]); }); track('gm_list');
+  ui.label('gm_status', text: 'running: $gameSel', frame: <int>[12, H - 30, 180, 18]); track('gm_status');
+  var gx = 204;
+  ui.game('gp', frame: <int>[gx, 60, W - gx - 12, H - 72]); track('gp');
+  ui.commit();
+  startGame(gameSel);
+}
+
 void buildTab(int i) {
+  if (activeTab == 9 && i != 9) stopGame();   // leaving the Game tab -> stop the game isolate
   activeTab = i;
   clearContent();
   switch (i) {
@@ -1175,6 +1248,7 @@ void buildTab(int i) {
     case 6: buildDebug(); break;
     case 7: buildVM(); break;
     case 8: buildHelp(); break;
+    case 9: buildGame(); break;
     default: buildPlaceholder(i); break;
   }
   ui.commit();
@@ -1547,6 +1621,29 @@ main(List<String> args) {
     new Timer(new Duration(milliseconds: t), () { wsResizeWindow(820, 560); }); t += 500;
     new Timer(new Duration(milliseconds: t), () { snap('resize_small'); }); t += 500;
     new Timer(new Duration(milliseconds: t), () { wsResizeWindow(1100, 800); }); t += 450;  // restore
+
+    // ── Game tab: spawn a gp game in its OWN isolate, let it render frames into
+    // the D3D11 pane, capture the HONEST frames (gpSnap = offscreen RT, gpSnapPresent
+    // = on-screen swapchain — both independent of PrintWindow), then drive the
+    // selector to a second game, then leave (stopGame must shut the isolate cleanly).
+    new Timer(new Duration(milliseconds: t), () { switchTab(9); print('GAME: -> Game tab, spawning $gameSel'); }); t += 2200;
+    new Timer(new Duration(milliseconds: t), () {
+      print('GAME: $gameSel frames=$gameFrames opened=$gameOpened');
+      var a = gpSnap('e:/windart/build/game_pane.png');
+      var b = gpSnapPresent('e:/windart/build/game_present.png');
+      print('GAME: gpSnap ${a.isEmpty ? "OK" : "ERR:$a"}  gpSnapPresent ${b.isEmpty ? "OK" : "ERR:$b"}');
+      snap('tab_game');
+    }); t += 450;
+    // Selector proof: switch to a second game (brickout) via startGame.
+    new Timer(new Duration(milliseconds: t), () { startGame('15_brickout'); print('GAME: -> 15_brickout'); }); t += 2200;
+    new Timer(new Duration(milliseconds: t), () {
+      print('GAME: 15_brickout frames=$gameFrames');
+      var a = gpSnap('e:/windart/build/game_brickout.png');
+      print('GAME: brickout gpSnap ${a.isEmpty ? "OK" : "ERR:$a"}');
+    }); t += 450;
+    // Leaving the Game tab must stop the isolate cleanly (no crash, no bleed).
+    new Timer(new Duration(milliseconds: t), () { switchTab(1); print('GAME: left Game tab -> stopGame done=$gameDone'); }); t += 450;
+    new Timer(new Duration(milliseconds: t), () { snap('tab_after_game'); }); t += 450;
 
     new Timer(new Duration(milliseconds: t), () { print('SELFTEST: done'); hostQuit(); });
   }
