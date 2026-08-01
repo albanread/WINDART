@@ -210,5 +210,18 @@ void Workspace_snapshotFull(Dart_NativeArguments args) {
   Dart_SetReturnValue(args, Dart_NewStringFromCString(err != NULL ? err : ""));
 }
 
+// W1 (snapshot-as-blob): bake the on-disk snapshot .bin into the image `blobs`
+// table (windart_snapshot_blob.cc, host layer). Driven from Dart as wsBakeSnapshot()
+// — the seed of an in-app "Recreate Snapshot". extern "C": one unmangled symbol.
+extern "C" int windart_bake_snapshots_to_image(char* msg, int msgSz);
+
+// wsBakeSnapshot() -> String status. Writes the current on-disk snapshot into the
+// SQLite image so the next boot can load the snapshot from the DB blob.
+void Workspace_bakeSnapshot(Dart_NativeArguments args) {
+  char msg[256];
+  windart_bake_snapshots_to_image(msg, static_cast<int>(sizeof(msg)));
+  Dart_SetReturnValue(args, Dart_NewStringFromCString(msg));
+}
+
 }  // namespace bin
 }  // namespace dart

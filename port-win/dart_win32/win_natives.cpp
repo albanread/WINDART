@@ -334,6 +334,7 @@ void Win_keyState(Dart_NativeArguments args);                  // cf. :498
 void Workspace_eval(Dart_NativeArguments args);                // cocoa_natives.mm:481
 void Workspace_reload(Dart_NativeArguments args);
 void Workspace_checkSyntax(Dart_NativeArguments args);         // validate-before-save
+void Workspace_bakeSnapshot(Dart_NativeArguments args);        // snapshot-as-blob (W1)
 void Workspace_vmStats(Dart_NativeArguments args);
 void Workspace_requestUiReload(Dart_NativeArguments args);
 void Workspace_uiReloadStatus(Dart_NativeArguments args);
@@ -390,6 +391,7 @@ void Sqlite_query(Dart_NativeArguments args);
   V(Workspace_eval, 1)                                                         \
   V(Workspace_reload, 0)                                                       \
   V(Workspace_checkSyntax, 2)                                                  \
+  V(Workspace_bakeSnapshot, 0)                                                 \
   V(Workspace_vmStats, 0)                                                      \
   V(Workspace_requestUiReload, 0)                                              \
   V(Workspace_uiReloadStatus, 0)                                               \

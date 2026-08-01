@@ -399,6 +399,7 @@ add_library(dart_win32 STATIC
   ${WIN32DIR}/windart_debug_natives.cc     # Workspace_debug* — the in-process debugger (T4)
   ${WIN32DIR}/windart_sqlite_natives.cc    # Sqlite_* (the workspace image, S7.3)
   ${WIN32DIR}/windart_userlib.cc           # userlib: tag handler — DB-served user source (Stage 1)
+  ${WIN32DIR}/windart_snapshot_blob.cc     # snapshot-as-blob: boot snapshot from the image (W1)
   ${RT}/third_party/sqlite/sqlite3.c       # vendored SQLite 3.45.0 amalgamation
   ${GEN}/win_gen.cc)              # dart:win library source array
 # SQLite: compile the amalgamation as C, quiet (it's a large generated file), with

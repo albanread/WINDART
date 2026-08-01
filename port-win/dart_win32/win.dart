@@ -15,6 +15,7 @@ int    processId()                 native "Win_getpid";
 String wsEval(String src)          native "Workspace_eval";
 String wsReload()                  native "Workspace_reload";
 String wsCheckSyntax(String src, String className) native "Workspace_checkSyntax";
+String wsBakeSnapshot()            native "Workspace_bakeSnapshot";
 List   wsVmStats()                 native "Workspace_vmStats";
 String wsRequestUiReload()         native "Workspace_requestUiReload";
 String wsUiReloadStatus()          native "Workspace_uiReloadStatus";

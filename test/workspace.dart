@@ -1145,6 +1145,7 @@ void pollMenu() {
 // ── main ─────────────────────────────────────────────────────────────────────
 main(List<String> args) {
   var selftest = args.contains('selftest');
+  var bake = args.contains('bake');   // W1: write the on-disk snapshot into the image
 
   // Browser data: the VM's class table, grouped by library (the Browser's
   // categories). classMirrors/classNames stay flat for Find/Docs/nav.
@@ -1198,6 +1199,16 @@ main(List<String> args) {
 
   new Timer.periodic(new Duration(seconds: 1), (_) => refreshVM());
   new Timer.periodic(new Duration(milliseconds: 150), (_) => pollMenu());   // menu/toolbar
+
+  if (bake) {
+    // W1: bake the current on-disk snapshot .bin into the SQLite image, then quit.
+    // The NEXT boot loads the snapshot from the DB blob (win_host fallback chain).
+    new Timer(new Duration(milliseconds: 150), () {
+      print('BAKE: ' + wsBakeSnapshot());
+      hostQuit();
+    });
+    return;
+  }
 
   if (selftest) {
     // Pick a class with rich members for the Browser snapshot.

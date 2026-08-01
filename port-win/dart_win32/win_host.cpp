@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>                    // getenv (WINDART_SELFTEST)
 #include <cstdint>                    // uint8_t (snapshot buffers, Stage 2)
+#include <cstring>                    // memcmp (snapshot version guard, W1)
 #include <cwchar>                     // wcscpy_s / wcscat_s (exe-dir path, Stage 2)
 
 #include "include/dart_api.h"
@@ -162,6 +163,32 @@ extern "C" const char* windart_take_ui_reload_status(void) {
 extern const uint8_t* vm_snapshot_data;             // snapshot_gen.cc (dart::bin)
 extern const uint8_t* core_isolate_snapshot_data;   //   ""
 
+// W1 (snapshot-as-blob): the boot snapshot can live IN the SQLite image. The read
+// path is in windart_snapshot_blob.cc (returns a malloc'd process-lifetime buffer
+// or NULL). Fallback chain below: DB blob -> on-disk .bin -> baked array.
+extern "C" unsigned char* windart_read_snapshot_blob(const char* key,
+                                                     unsigned int* out_size);
+
+// A candidate snapshot (DB blob) is compatible with THIS build iff its version +
+// features header matches the baked array's. Snapshot layout is
+// [16-byte Snapshot header][version (no null)][features (null-terminated)][data];
+// comparing [16 .. features-null] covers version+features and STOPS before the data,
+// so a legitimately re-baked snapshot (same VM build, new classes/data) still
+// matches. The baked arrays are always present and are the authoritative "this
+// build's version", so no VM-internal symbol is needed. A mismatch -> skip the blob
+// and fall back, rather than let Dart_CreateIsolate abort on a stale snapshot.
+static bool WindartSnapshotCompatible(const unsigned char* cand, unsigned int candSz,
+                                      const uint8_t* baked) {
+  const int H = 16, CAP = 1024;   // Snapshot::kHeaderSize == 2*sizeof(int64_t)
+  if (static_cast<int>(candSz) <= H) return false;
+  int ci = H;
+  while (ci < static_cast<int>(candSz) && ci < H + CAP && cand[ci] != 0) ci++;
+  int bi = H;
+  while (bi < H + CAP && baked[bi] != 0) bi++;
+  if (ci >= H + CAP || bi >= H + CAP || ci != bi) return false;
+  return memcmp(cand + H, baked + H, static_cast<size_t>(ci - H)) == 0;
+}
+
 static uint8_t* WindartReadWholeFile(const wchar_t* path, DWORD* out_size) {
   HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -187,6 +214,28 @@ static uint8_t* WindartReadWholeFile(const wchar_t* path, DWORD* out_size) {
 }
 
 extern "C" void windart_load_snapshots_from_disk(void) {
+  // 1) The world: boot the snapshot from the SQLite image `blobs` table, if BOTH
+  //    blobs are present AND version-compatible with this build. (Same all-or-
+  //    nothing rule as the .bin path — a half/mismatched swap would abort.)
+  {
+    unsigned int vSz = 0, iSz = 0;
+    unsigned char* vBlob = windart_read_snapshot_blob("snapshot:vm", &vSz);
+    unsigned char* iBlob = windart_read_snapshot_blob("snapshot:isolate", &iSz);
+    if (vBlob != nullptr && iBlob != nullptr &&
+        WindartSnapshotCompatible(vBlob, vSz, vm_snapshot_data) &&
+        WindartSnapshotCompatible(iBlob, iSz, core_isolate_snapshot_data)) {
+      vm_snapshot_data = vBlob;            // process-lifetime (VM does not copy)
+      core_isolate_snapshot_data = iBlob;
+      std::fprintf(
+          stderr,
+          "[windart] snapshot: booting from DB image blob (vm=%u iso=%u bytes)\n",
+          vSz, iSz);
+      return;
+    }
+    if (vBlob != nullptr) free(vBlob);     // absent/stale -> fall back to the .bin
+    if (iBlob != nullptr) free(iBlob);
+  }
+  // 2) Stage 2: the two on-disk .bin next to the exe.
   wchar_t exe[MAX_PATH];
   DWORD len = GetModuleFileNameW(nullptr, exe, MAX_PATH);
   if (len == 0 || len >= MAX_PATH) return;
