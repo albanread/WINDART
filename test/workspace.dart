@@ -1166,7 +1166,7 @@ void buildPlaceholder(int i) {
 // The plug-in-app-off-the-UI-isolate model: the game runs in a spawned isolate that
 // flushes ['draw', cmds] frames over a port; we gpOpen on the first `gpopen` command,
 // then gpApply each frame and pull-pace the next. Mirrors test/game_live.dart.
-final gpGames = const ['13_invaders', '13_invaders_hlsl', '15_brickout', '12_copper', 'abc'];
+final gpGames = const ['13_invaders', '13_invaders_hlsl', '15_brickout', '12_copper', 'tiletest', 'fonttest', 'abc'];
 String gameSel = '13_invaders';
 const int gpW = 424, gpH = 240;              // logical game size (the engine letterboxes)
 ReceivePort gameRp;
@@ -1634,12 +1634,14 @@ main(List<String> args) {
       print('GAME: gpSnap ${a.isEmpty ? "OK" : "ERR:$a"}  gpSnapPresent ${b.isEmpty ? "OK" : "ERR:$b"}');
       snap('tab_game');
     }); t += 450;
-    // Selector proof: switch to a second game (brickout) via startGame.
-    new Timer(new Duration(milliseconds: t), () { startGame('15_brickout'); print('GAME: -> 15_brickout'); }); t += 2200;
+    // Selector proof + tile-layers on-screen: switch to tiletest via startGame,
+    // capture BOTH offscreen (gpSnap) and the live swapchain (gpSnapPresent).
+    new Timer(new Duration(milliseconds: t), () { startGame('tiletest'); print('GAME: -> tiletest'); }); t += 2200;
     new Timer(new Duration(milliseconds: t), () {
-      print('GAME: 15_brickout frames=$gameFrames');
-      var a = gpSnap('e:/windart/build/game_brickout.png');
-      print('GAME: brickout gpSnap ${a.isEmpty ? "OK" : "ERR:$a"}');
+      print('GAME: tiletest frames=$gameFrames');
+      var a = gpSnap('e:/windart/build/game_tiletest.png');
+      var b = gpSnapPresent('e:/windart/build/game_tiletest_present.png');
+      print('GAME: tiletest gpSnap ${a.isEmpty ? "OK" : "ERR:$a"}  present ${b.isEmpty ? "OK" : "ERR:$b"}');
     }); t += 450;
     // Leaving the Game tab must stop the isolate cleanly (no crash, no bleed).
     new Timer(new Duration(milliseconds: t), () { switchTab(1); print('GAME: left Game tab -> stopGame done=$gameDone'); }); t += 450;
