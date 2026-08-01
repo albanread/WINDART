@@ -52,6 +52,47 @@ static const char* kIndexedHlsl =
     "  return palette[k];\n"
     "}\n";
 
+// Tile layers (RASM layers 1 & 2): a screen pixel -> world pixel (+ scroll, torus
+// wrap) -> tile cell -> tile id (mapTex) -> pixel in the atlas -> palette resolve.
+// Tile id 0 = empty cell; index 0 within a tile = transparent. Shares the pane's
+// palette (per-line 0..15 keyed by screen scanline, global 16..255).
+static const char* kTileHlsl =
+    "struct VOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
+    "cbuffer TileUniforms : register(b0) {\n"
+    "  float scroll_x; float scroll_y; float viewport_w; float viewport_h;\n"
+    "  float tile_w; float tile_h; float map_cols; float map_rows;\n"
+    "};\n"
+    "Texture2D<uint>          atlasTex : register(t0);\n"
+    "Texture2D<uint>          mapTex   : register(t1);\n"
+    "StructuredBuffer<float4> palette  : register(t2);\n"
+    "VOut vs_tile(uint vid : SV_VertexID) {\n"
+    "  float2 positions[3] = { float2(-1.0,-1.0), float2(3.0,-1.0), float2(-1.0,3.0) };\n"
+    "  float2 pos = positions[vid];\n"
+    "  VOut o; o.pos = float4(pos, 0.0, 1.0);\n"
+    "  o.uv = float2((pos.x+1.0)*0.5, 1.0-(pos.y+1.0)*0.5); return o;\n"
+    "}\n"
+    "float4 ps_tile(VOut input) : SV_Target {\n"
+    "  int screenX = int(input.uv.x * viewport_w);\n"
+    "  int screenY = int(input.uv.y * viewport_h);\n"
+    "  int tw = int(tile_w), th = int(tile_h);\n"
+    "  int worldW = int(map_cols) * tw;\n"
+    "  int worldH = int(map_rows) * th;\n"
+    "  int wx = screenX + int(scroll_x);\n"
+    "  int wy = screenY + int(scroll_y);\n"
+    "  wx = ((wx % worldW) + worldW) % worldW;\n"
+    "  wy = ((wy % worldH) + worldH) % worldH;\n"
+    "  int cx = wx / tw, cy = wy / th;\n"
+    "  uint tid = mapTex.Load(int3(cx, cy, 0));\n"
+    "  if (tid == 0u) { discard; }\n"
+    "  int px = wx - cx*tw, py = wy - cy*th;\n"
+    "  uint ci = atlasTex.Load(int3(px, int(tid)*th + py, 0));\n"
+    "  if (ci == 0u) { discard; }\n"
+    "  uint k;\n"
+    "  if (ci < 16u) { k = uint(screenY)*16u + ci; }\n"
+    "  else { k = uint(viewport_h)*16u + (ci - 16u); }\n"
+    "  return palette[k];\n"
+    "}\n";
+
 static const char* kSpriteHlsl =
     "struct SVIn  { float2 pos : POSITION; float2 uv : TEXCOORD0; };\n"
     "struct SVOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
@@ -423,6 +464,56 @@ void GpIndexedPane::render(ID3D11RenderTargetView* rtv, bool clear) {
   ctx->PSSetConstantBuffers(0, 1, cb_.GetAddressOf());
   ID3D11ShaderResourceView* srvs[2] = { srv_[kFront].Get(), palette_srv_.Get() };
   ctx->PSSetShaderResources(0, 2, srvs);
+  ctx->Draw(3, 0);
+}
+
+// ============================================================================
+// GpTileLayer — indexed tilemap layers (RASM layers 1 & 2)
+// ============================================================================
+
+GpTileLayer::GpTileLayer(GpGfx* gfx, int viewport_w, int viewport_h,
+                         std::string* err)
+    : gfx_(gfx), viewport_w_(viewport_w), viewport_h_(viewport_h),
+      tile_w_(0), tile_h_(0), tile_count_(0), cols_(0), rows_(0),
+      scroll_x_(0.0), scroll_y_(0.0) {
+  cb_ = MakeCB(gfx_->dev, 32);                 // 8 floats
+  ComPtr<ID3DBlob> vsb;
+  if (!MakeVS(gfx_->dev, kTileHlsl, "vs_tile", vs_, &vsb, err)) return;
+  if (!MakePS(gfx_->dev, kTileHlsl, "ps_tile", ps_, err)) return;
+}
+
+void GpTileLayer::set_tileset(const uint8_t* atlas, int tile_w, int tile_h,
+                              int count) {
+  if (!atlas || tile_w <= 0 || tile_h <= 0 || count <= 0) return;
+  tile_w_ = tile_w; tile_h_ = tile_h; tile_count_ = count;
+  atlas_srv_.Reset(); atlas_tex_.Reset();
+  MakeIndexTex(gfx_->dev, tile_w, tile_h * count, atlas, atlas_tex_, atlas_srv_);
+}
+
+void GpTileLayer::set_map(const uint8_t* map, int cols, int rows) {
+  if (!map || cols <= 0 || rows <= 0) { cols_ = 0; rows_ = 0; return; }
+  cols_ = cols; rows_ = rows;
+  map_srv_.Reset(); map_tex_.Reset();
+  MakeIndexTex(gfx_->dev, cols, rows, map, map_tex_, map_srv_);
+}
+
+void GpTileLayer::render(ID3D11RenderTargetView* rtv,
+                         ID3D11ShaderResourceView* palette) {
+  (void)rtv;                                   // RTV is bound once by render_present
+  if (!ready() || !ps_) return;
+  ID3D11DeviceContext* ctx = gfx_->ctx;
+  ctx->OMSetBlendState(nullptr, nullptr, 0xffffffff);   // discard-composite (index 0)
+  float u[8] = { (float)scroll_x_, (float)scroll_y_,
+                 (float)viewport_w_, (float)viewport_h_,
+                 (float)tile_w_, (float)tile_h_, (float)cols_, (float)rows_ };
+  ctx->UpdateSubresource(cb_.Get(), 0, nullptr, u, 0, 0);
+  ctx->IASetInputLayout(nullptr);
+  ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  ctx->VSSetShader(vs_.Get(), nullptr, 0);
+  ctx->PSSetShader(ps_.Get(), nullptr, 0);
+  ctx->PSSetConstantBuffers(0, 1, cb_.GetAddressOf());
+  ID3D11ShaderResourceView* srvs[3] = { atlas_srv_.Get(), map_srv_.Get(), palette };
+  ctx->PSSetShaderResources(0, 3, srvs);
   ctx->Draw(3, 0);
 }
 
@@ -870,7 +961,7 @@ GpEngine::GpEngine()
       sfx_(NULL),
       fullscreen_(false), direct_(false), open_(false),
       logical_w_(0), logical_h_(0), frames_(0), last_qpc_(0), qpc_freq_(1),
-      present_hwnd_(NULL), sc_w_(0), sc_h_(0) {}
+      present_hwnd_(NULL), sc_w_(0), sc_h_(0) { bg_[0] = NULL; bg_[1] = NULL; }
 
 // SFX is process-lifetime (one IXAudio2 per process), created on first use and
 // kept across game close/re-open — unlike the per-game D3D panes.
@@ -965,6 +1056,8 @@ int64_t GpEngine::open(int w, int h, int world_w, int world_h, bool direct,
 
   std::string e;
   pane_ = new GpIndexedPane(&gfx_, world_w, world_h, w, h, &e);
+  bg_[0] = new GpTileLayer(&gfx_, w, h, &e);   // RASM tile layers 1 & 2
+  bg_[1] = new GpTileLayer(&gfx_, w, h, &e);
   sprites_ = new GpSprites(&gfx_, &e);
   blitter_ = new GpBlitter();
   text_ = new GpTextOverlay(&gfx_, w, h, &e);
@@ -983,6 +1076,8 @@ int64_t GpEngine::open(int w, int h, int world_w, int world_h, bool direct,
 
 void GpEngine::close() {
   delete pane_; pane_ = NULL;
+  delete bg_[0]; bg_[0] = NULL;
+  delete bg_[1]; bg_[1] = NULL;
   delete sprites_; sprites_ = NULL;
   delete blitter_; blitter_ = NULL;
   delete text_; text_ = NULL;
@@ -1139,7 +1234,10 @@ void GpEngine::render_present() {
   text_->upload();
   bool has_shader = shader_->ready();
   if (has_shader) shader_->render(offscreen_rtv_.Get());
-  pane_->render(offscreen_rtv_.Get(), !has_shader);
+  else ctx_->ClearRenderTargetView(offscreen_rtv_.Get(), kBlack);   // clear once, up front
+  bg_[0]->render(offscreen_rtv_.Get(), pane_->palette_srv());       // RASM tile layer 1
+  bg_[1]->render(offscreen_rtv_.Get(), pane_->palette_srv());       // RASM tile layer 2
+  pane_->render(offscreen_rtv_.Get(), false);                       // indexed pixels (bg cleared above)
   sprites_->render(offscreen_rtv_.Get(), (double)pane_->scroll_x(),
                    (double)pane_->scroll_y(), (double)logical_w_, (double)logical_h_);
   text_->render(offscreen_rtv_.Get());
@@ -1153,7 +1251,7 @@ void GpEngine::render_present() {
   }
 }
 
-// --- gpsnap: offscreen -> WIC PNG (BGRA read, RGBA write) --------------------
+// --- gpsnap: offscreen -> WIC PNG (BGRA straight through) --------------------
 
 static bool WriteRgbaPng(const std::vector<uint8_t>& rgba, int w, int h,
                          const char* path, std::string* err) {
@@ -1179,7 +1277,10 @@ static bool WriteRgbaPng(const std::vector<uint8_t>& rgba, int w, int h,
       SUCCEEDED(enc->CreateNewFrame(&frame, &bag)) &&
       SUCCEEDED(frame->Initialize(bag))) {
     frame->SetSize(w, h);
-    WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppRGBA;
+    // The PNG encoder's native 32bpp format is BGRA, not RGBA — requesting RGBA
+    // makes SetPixelFormat silently fall back to BGRA and misencode (R/B swap).
+    // We feed straight BGRA bytes (the offscreen/backbuffer format) and declare it.
+    WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
     frame->SetPixelFormat(&fmt);
     if (SUCCEEDED(frame->WritePixels(h, (UINT)(w * 4), (UINT)rgba.size(),
                                      const_cast<uint8_t*>(rgba.data()))) &&
@@ -1217,10 +1318,10 @@ bool GpEngine::snap(const char* path, std::string* err) {
   for (int y = 0; y < h; y++) {
     const uint8_t* row = (const uint8_t*)m.pData + (size_t)y * m.RowPitch;
     for (int x = 0; x < w; x++) {
-      rgba[((size_t)y * w + x) * 4 + 0] = row[x * 4 + 2];   // B->R
+      rgba[((size_t)y * w + x) * 4 + 0] = row[x * 4 + 0];   // B
       rgba[((size_t)y * w + x) * 4 + 1] = row[x * 4 + 1];   // G
-      rgba[((size_t)y * w + x) * 4 + 2] = row[x * 4 + 0];   // R->B
-      rgba[((size_t)y * w + x) * 4 + 3] = 255;
+      rgba[((size_t)y * w + x) * 4 + 2] = row[x * 4 + 2];   // R
+      rgba[((size_t)y * w + x) * 4 + 3] = 255;              // opaque; kept BGRA for WIC
     }
   }
   ctx_->Unmap(staging_.Get(), 0);
@@ -1262,9 +1363,9 @@ bool GpEngine::snap_present(const char* path, std::string* err) {
   for (int y = 0; y < h; y++) {
     const uint8_t* row = (const uint8_t*)m.pData + (size_t)y * m.RowPitch;
     for (int x = 0; x < w; x++) {
-      rgba[((size_t)y * w + x) * 4 + 0] = row[x * 4 + 2];
+      rgba[((size_t)y * w + x) * 4 + 0] = row[x * 4 + 0];
       rgba[((size_t)y * w + x) * 4 + 1] = row[x * 4 + 1];
-      rgba[((size_t)y * w + x) * 4 + 2] = row[x * 4 + 0];
+      rgba[((size_t)y * w + x) * 4 + 2] = row[x * 4 + 2];
       rgba[((size_t)y * w + x) * 4 + 3] = 255;
     }
   }

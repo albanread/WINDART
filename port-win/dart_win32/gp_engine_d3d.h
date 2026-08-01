@@ -81,6 +81,9 @@ class GpIndexedPane {
   std::vector<uint8_t>& buffer(int slot) { return buffers_[slot]; }
   bool dirty(int slot) const { return dirty_[slot]; }
   void set_dirty(int slot, bool d) { dirty_[slot] = d; }
+  // The shared palette (per-line 0..15 + global 16..255) — tile layers resolve
+  // through it too, so all layers agree on colour.
+  ID3D11ShaderResourceView* palette_srv() const { return palette_srv_.Get(); }
 
  private:
   GpGfx* gfx_;
@@ -96,6 +99,42 @@ class GpIndexedPane {
   ComPtr<ID3D11ShaderResourceView> palette_srv_;
   bool palette_dirty_;
   ComPtr<ID3D11Buffer> cb_;        // IndexedUniforms (b0)
+  ComPtr<ID3D11VertexShader> vs_;
+  ComPtr<ID3D11PixelShader> ps_;
+};
+
+// --- layers 1 & 2: indexed tile layers (RASM tilemaps + parallax) -----------
+// A background layer: a tile ATLAS (R8_UINT, `count` tiles stacked vertically,
+// tile_w x tile_h each) + a MAP (R8_UINT, cols x rows cells -> tile id; id 0 =
+// empty cell) + an independent scroll that WRAPS as a torus (infinite parallax
+// from a small map). Resolves through the SHARED palette in the pixel shader
+// (index 0 = the only transparency), composited behind the free-draw pane. Two
+// instances (bg0/bg1) give classic multi-speed parallax.
+class GpTileLayer {
+ public:
+  GpTileLayer(GpGfx* gfx, int viewport_w, int viewport_h, std::string* err);
+  void set_tileset(const uint8_t* atlas, int tile_w, int tile_h, int count);
+  void set_map(const uint8_t* map, int cols, int rows);
+  void set_scroll(double x, double y) { scroll_x_ = x; scroll_y_ = y; }
+  void clear() { cols_ = 0; rows_ = 0; }               // hide the layer
+  bool ready() const {
+    return cols_ > 0 && rows_ > 0 && tile_count_ > 0 && atlas_srv_ && map_srv_;
+  }
+  // Composite this layer (discarding empty cells / index-0 pixels) into rtv,
+  // resolving colour through the caller's shared palette SRV.
+  void render(ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView* palette);
+
+ private:
+  GpGfx* gfx_;
+  int viewport_w_, viewport_h_;
+  int tile_w_, tile_h_, tile_count_;
+  int cols_, rows_;
+  double scroll_x_, scroll_y_;
+  ComPtr<ID3D11Texture2D> atlas_tex_;
+  ComPtr<ID3D11ShaderResourceView> atlas_srv_;
+  ComPtr<ID3D11Texture2D> map_tex_;
+  ComPtr<ID3D11ShaderResourceView> map_srv_;
+  ComPtr<ID3D11Buffer> cb_;            // TileUniforms (b0), 32 bytes
   ComPtr<ID3D11VertexShader> vs_;
   ComPtr<ID3D11PixelShader> ps_;
 };
@@ -226,6 +265,7 @@ class GpEngine {
   GpBlitter* blitter() { return blitter_; }
   GpTextOverlay* text() { return text_; }
   GpShaderPane* shader() { return shader_; }
+  GpTileLayer* bg(int i) { return (i >= 0 && i < 2) ? bg_[i] : nullptr; }
   GpSfx* sfx();                    // lazily started XAudio2 SFX (T3 audio)
 
   void set_fullscreen(bool on) { fullscreen_ = on; }   // no live window yet
@@ -282,6 +322,7 @@ class GpEngine {
   ComPtr<ID3D11SamplerState> present_sampler_;       // LINEAR/CLAMP
 
   GpIndexedPane* pane_;
+  GpTileLayer* bg_[2];              // RASM layers 1 & 2 (behind the indexed pane)
   GpSprites* sprites_;
   GpBlitter* blitter_;
   GpTextOverlay* text_;

@@ -228,6 +228,38 @@ void Win_gpApply(Dart_NativeArguments args) {
                                 ElInt(c, 4), ElInt(c, 5), ElInt(c, 6), ElInt(c, 7),
                                 ElInt(c, 8), ElInt(c, 9),
                                 cn > 10 ? ClampByte(ElInt(c, 10)) : 0);
+    } else if (strcmp(op, "gptileset") == 0 && cn >= 6) {
+      int64_t layer = ElInt(c, 1), tw = ElInt(c, 2), th = ElInt(c, 3),
+              count = ElInt(c, 4);
+      const char* b64 = ElStr(c, 5);
+      std::vector<uint8_t> bytes;
+      GpTileLayer* L = eng->bg((int)layer);
+      if (L == NULL) verr = "gptileset: layer 0..1";
+      else if (tw < 1 || th < 1 || count < 1 || tw > 256 || th > 256 || count > 1024)
+        verr = "gptileset: bad tile dims";
+      else if (b64 == NULL || !DecodeB64(b64, &bytes)) verr = "gptileset: bad base64";
+      else if (bytes.size() < (size_t)(tw * th * count))
+        verr = "gptileset: atlas smaller than tw*th*count";
+      else L->set_tileset(bytes.data(), (int)tw, (int)th, (int)count);
+    } else if (strcmp(op, "gptilemap") == 0 && cn >= 5) {
+      int64_t layer = ElInt(c, 1), cols = ElInt(c, 2), rows = ElInt(c, 3);
+      const char* b64 = ElStr(c, 4);
+      std::vector<uint8_t> bytes;
+      GpTileLayer* L = eng->bg((int)layer);
+      if (L == NULL) verr = "gptilemap: layer 0..1";
+      else if (cols < 1 || rows < 1 || cols > 4096 || rows > 4096)
+        verr = "gptilemap: bad map dims";
+      else if (b64 == NULL || !DecodeB64(b64, &bytes)) verr = "gptilemap: bad base64";
+      else if (bytes.size() < (size_t)(cols * rows))
+        verr = "gptilemap: map smaller than cols*rows";
+      else L->set_map(bytes.data(), (int)cols, (int)rows);
+    } else if (strcmp(op, "gptilescroll") == 0 && cn >= 4) {
+      GpTileLayer* L = eng->bg((int)ElInt(c, 1));
+      if (L == NULL) verr = "gptilescroll: layer 0..1";
+      else L->set_scroll((double)ElInt(c, 2), (double)ElInt(c, 3));
+    } else if (strcmp(op, "gptileclear") == 0 && cn >= 2) {
+      GpTileLayer* L = eng->bg((int)ElInt(c, 1));
+      if (L != NULL) L->clear();
     } else if (strcmp(op, "gptextclear") == 0) {
       eng->text()->clear();
     } else if (strcmp(op, "gptext") == 0 && cn >= 7) {

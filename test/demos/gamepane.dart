@@ -19,6 +19,7 @@
 //   }
 library gamepane;
 
+import 'dart:convert';
 import 'dart:isolate';
 
 import 'abc.dart';
@@ -96,6 +97,33 @@ class GamePane {
   void blit(int mode, int src, int dst, int sx, int sy, int dx, int dy,
             int w, int h, [int value = 0]) =>
       _cmds.add(<dynamic>['gpblit', mode, src, dst, sx, sy, dx, dy, w, h, value]);
+
+  // --- tile layers (RASM layers 1 & 2: indexed tilemaps + parallax) ----------
+  // Two background layers (0 and 1) sit BEHIND the free-draw pane. Each is a tile
+  // atlas + a tilemap that WRAPS under scroll — a small map tiles an infinite
+  // world. Different scroll rates per layer give parallax. Colours resolve through
+  // the same palette (index 0 = transparent). Define the set + map ONCE (on the
+  // first frame), then scroll per frame.
+
+  /// Define layer [layer]'s (0 or 1) tileset: [count] tiles, each [tileW]x[tileH]
+  /// 8-bit indices, as one flat row-major byte list (tile t at
+  /// t*tileW*tileH..). Index 0 within a tile is transparent.
+  void tileset(int layer, int tileW, int tileH, int count, List<int> atlas) =>
+      _cmds.add(<dynamic>['gptileset', layer, tileW, tileH, count,
+                          BASE64.encode(atlas)]);
+
+  /// Set layer [layer]'s tilemap: [cols]x[rows] cells, each a tile id (0 = empty),
+  /// flat row-major. The map wraps (torus) under scroll.
+  void tilemap(int layer, int cols, int rows, List<int> map) =>
+      _cmds.add(<dynamic>['gptilemap', layer, cols, rows, BASE64.encode(map)]);
+
+  /// Scroll layer [layer] to pixel offset ([x],[y]) (wraps). Distinct per-layer
+  /// rates = parallax.
+  void tileScroll(int layer, int x, int y) =>
+      _cmds.add(<dynamic>['gptilescroll', layer, x, y]);
+
+  /// Hide layer [layer] (drops its map).
+  void tileClear(int layer) => _cmds.add(<dynamic>['gptileclear', layer]);
 
   // --- HUD text (seven-segment digits; letters draw as boxes) ---------------
   void textClear() => _cmds.add(<dynamic>['gptextclear']);
