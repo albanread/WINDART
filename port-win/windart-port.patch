@@ -127,7 +127,36 @@
   * Timeline
 --- a/runtime/bin/main.cc
 +++ b/runtime/bin/main.cc
-@@ -1283,6 +1283,17 @@
+@@ -45,6 +45,13 @@
+ extern const uint8_t* core_isolate_snapshot_data;
+ extern const uint8_t* core_isolate_snapshot_instructions;
+ 
++// WINDART Stage 1: the userlib: library tag handler (dart_win32/windart_userlib.cc).
++// Declared here at namespace scope (dart::bin) so it links to the definition;
++// a block-scope decl would bind to the GLOBAL namespace and fail to link.
++Dart_Handle WindartUserTagHandler(Dart_LibraryTag tag,
++                                  Dart_Handle library,
++                                  Dart_Handle url);
++
+ /**
+  * Global state used to control and store generation of application snapshots
+  * An application snapshot can be generated and run using the following
+@@ -944,7 +951,14 @@
+   Dart_EnterScope();
+ 
+   // Set up the library tag handler for this isolate.
++#if defined(DART_UI_HOST)
++  // WINDART Stage 1: serve `userlib:` from the SQLite image (the DB is the source
++  // of truth); every other URL delegates to the stock loader (windart_userlib.cc,
++  // declared at namespace scope above).
++  Dart_Handle result = Dart_SetLibraryTagHandler(WindartUserTagHandler);
++#else
+   Dart_Handle result = Dart_SetLibraryTagHandler(Loader::LibraryTagHandler);
++#endif
+   CHECK_RESULT(result);
+ 
+   if (kernel_program != NULL) {
+@@ -1283,6 +1297,17 @@
  }
  
  
@@ -145,7 +174,7 @@
  bool RunMainIsolate(const char* script_name, CommandLineOptions* dart_options) {
    // Call CreateIsolateAndSetup which creates an isolate and loads up
    // the specified application script.
-@@ -1450,8 +1461,19 @@
+@@ -1450,8 +1475,19 @@
                             kNumIsolateArgs, isolate_args);
        CHECK_RESULT(result);
  
@@ -165,7 +194,7 @@
        // Generate an app snapshot after execution if specified.
        if (gen_snapshot_kind == kAppJIT) {
          if (!Dart_IsCompilationError(result)) {
-@@ -1611,6 +1633,13 @@
+@@ -1611,6 +1647,13 @@
    bool print_flags_seen = false;
    bool verbose_debug_seen = false;
  
@@ -179,7 +208,7 @@
    // Perform platform specific initialization.
    if (!Platform::Initialize()) {
      Log::PrintErr("Initialization failed\n");
-@@ -1687,6 +1716,14 @@
+@@ -1687,6 +1730,14 @@
    TimerUtils::InitOnce();
    EventHandler::Start();
  

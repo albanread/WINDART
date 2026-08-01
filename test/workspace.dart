@@ -10,11 +10,11 @@ import 'dart:io';
 import 'dart:async';
 import 'dart:isolate';   // T4: spawn the debug target isolate
 import 'dart:mirrors';
-import 'user_lib.dart';   // Stage 1: the live user library, materialized from the
-// SQLite image. Single isolate now: mirrors + a source import coexist since the
-// scanner tolerates a leading BOM (the old allocation.cc:37 abort was that BOM,
-// not a mirrors/source-loading limit). Accept rewrites user_lib.dart from the
-// image + hot-reloads, morphing live instances in place (materializeUserLib/accept).
+import 'userlib:user';    // Stage 1: the live user library, served SYNCHRONOUSLY from
+// the SQLite image by a C++ tag handler (dart_win32/windart_userlib.cc) — no scratch
+// file, the DB is the source of truth. Single isolate: mirrors + a source import
+// coexist since the scanner tolerates a leading BOM. Accept rewrites the `userlib`
+// rows + hot-reloads (ReloadSources re-invokes the handler), morphing live instances.
 
 // ── lexDart (verbatim from workspace.dart) — syntax runs for the source panes ─
 final Set<String> _kw = new Set<String>.from(<String>[
@@ -613,7 +613,9 @@ void buildEditorClassList() {
 
 String editorSourceFor(String cls) {
   var db = openImage();
-  var rows = db.query('SELECT source FROM classes WHERE name = ?', [cls]);
+  var isUser = userClassNames.contains(cls);
+  if (isUser) db.exec('CREATE TABLE IF NOT EXISTS userlib(name TEXT PRIMARY KEY, source TEXT)', const []);
+  var rows = db.query('SELECT source FROM ' + (isUser ? 'userlib' : 'classes') + ' WHERE name = ?', [cls]);
   db.close();
   if (rows.isNotEmpty && rows[0][0].toString().isNotEmpty) return rows[0][0].toString();
   if (cls == 'Counter') {
@@ -649,7 +651,7 @@ void buildEditor() {
   ui.editor('ed_source', frame: <int>[12, 92, W - 24, srcH]); track('ed_source');
   ui.button('ed_accept', title: 'Accept', frame: <int>[12, acceptY, 120, 28], onClick: accept); track('ed_accept');
   ui.label('ed_status', text: 'editing $currentEditClass', frame: <int>[148, acceptY + 4, W - 160, 18]); track('ed_status');
-  ui.label('ed_note', text: 'Accept rewrites user_lib.dart from the image + hot-reloads: live instances of user classes MORPH in place (state kept, new fields added). Persists to the image (survives restart).', frame: <int>[12, acceptY + 36, W - 24, 18]); track('ed_note');
+  ui.label('ed_note', text: 'Accept writes the user class to the SQLite image (userlib) + hot-reloads: live instances MORPH in place (state kept, new fields added). A C++ tag handler serves the source from the image - no file. Survives restart.', frame: <int>[12, acceptY + 36, W - 24, 18]); track('ed_note');
   ui.label('ed_img', text: 'image: $imgPath', frame: <int>[12, acceptY + 62, W - 24, 18]); track('ed_img');
   var src = editorSourceFor(currentEditClass);
   ui.set('ed_source', {'text': wr(src)});
@@ -659,29 +661,19 @@ void buildEditor() {
   ui.applySpans('ed_source', lexDart(src));
 }
 
-// ── Stage 1: the live user library (materialized from the SQLite image) ───────
-// user_lib.dart (imported at the top) holds the live, editable user classes.
-// Accept writes the edited source to the image, rewrites user_lib.dart from the
-// image, and hot-reloads — live instances morph in place. (Order-B: the file is
-// swapped for a C++ DB tag handler later; see port-win/STAGE1_DESIGN.md.)
+// ── Stage 1: the live user library (DB-served, single isolate) ────────────────
+// The user classes live in the image's `userlib` table. `import 'userlib:user'`
+// (top) is served SYNCHRONOUSLY from that table by a C++ tag handler
+// (dart_win32/windart_userlib.cc). Accept writes the edited source to `userlib`
+// and hot-reloads; ReloadSources re-invokes the handler, re-reads the image, and
+// morphs live instances in place. No scratch file — the DB is the source of truth.
 final List<String> userClassNames = <String>['Counter'];   // the live user classes
 dynamic liveCounter;                                        // a live instance to morph
 
-String _userLibPath() =>
-    new File.fromUri(Platform.script).parent.path + '\\user_lib.dart';
+// User-class source lives in the image's `userlib` table; the C++ userlib: tag
+// handler (windart_userlib.cc) serves it to `import 'userlib:user'` — no file.
 
-void materializeUserLib() {
-  var sb = new StringBuffer();
-  sb.writeln('// WINDART user library — GENERATED from the SQLite image by Accept.');
-  sb.writeln('// Edit via the Editor tab + Accept (this file is rewritten from the image).');
-  for (var name in userClassNames) {
-    sb.writeln(editorSourceFor(name).replaceAll('\r', ''));
-    sb.writeln();
-  }
-  new File(_userLibPath()).writeAsStringSync(sb.toString());
-}
-
-// Read the live instance's state via eval in the root library (sees user_lib's Counter).
+// Read the live instance's state via eval in the root library (sees userlib's Counter).
 String liveState() {
   var n = wsEval('liveCounter == null ? "-" : liveCounter.n');
   var step = wsEval('liveCounter == null ? "" : liveCounter.step');
@@ -693,13 +685,17 @@ String liveState() {
 void accept() {
   var sel = ui.editorSelection('ed_source');
   var src = sel[2].toString().replaceAll('\r\n', '\n').replaceAll('\r', '\n').trim();
-  var db = openImage();
-  db.exec('INSERT OR REPLACE INTO classes(name, source) VALUES(?, ?)', [currentEditClass, src]);
-  db.close();
   var isUser = userClassNames.contains(currentEditClass);
-  if (isUser) materializeUserLib();   // rewrite user_lib.dart from the image; the reload re-reads it
-  wsRequestUiReload();
-  ui.set('ed_status', {'text': 'Accept: wrote image' + (isUser ? ' + user_lib.dart -> reloading (morph)...' : ' -> reloading...')});
+  var db = openImage();
+  if (isUser) {
+    db.exec('CREATE TABLE IF NOT EXISTS userlib(name TEXT PRIMARY KEY, source TEXT)', const []);
+    db.exec('INSERT OR REPLACE INTO userlib(name, source) VALUES(?, ?)', [currentEditClass, src]);
+  } else {
+    db.exec('INSERT OR REPLACE INTO classes(name, source) VALUES(?, ?)', [currentEditClass, src]);
+  }
+  db.close();
+  wsRequestUiReload();   // ReloadSources re-invokes the userlib: handler -> re-reads the image -> morph
+  ui.set('ed_status', {'text': 'Accept: wrote image' + (isUser ? ' (userlib) -> reloading (morph)...' : ' -> reloading...')});
   ui.commit();
   new Timer(new Duration(milliseconds: 350), () {
     var st = wsUiReloadStatus();
