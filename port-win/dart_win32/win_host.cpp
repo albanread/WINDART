@@ -77,6 +77,15 @@ static int g_toolbar_h = 0;
 int WinHostToolbarHeight() { return g_toolbar_h; }
 HWND WinHostToolbarHwnd() { return g_toolbar; }
 
+// Native status bar (msctls_statusbar32) spanning the bottom. The pane container is
+// inset above it (WM_SIZE + OpenPane); the app sets its text via WinHostSetStatus.
+static HWND g_statusbar = nullptr;
+static int g_statusbar_h = 0;
+int WinHostStatusHeight() { return g_statusbar_h; }
+void WinHostSetStatus(const wchar_t* text) {
+  if (g_statusbar != nullptr) SetWindowTextW(g_statusbar, text);
+}
+
 // The window handle as a raw intptr in an atomic, so NotifyUi (any thread) can
 // read it at notify time. THE BUG-FIX from win.rs:159-211: the VM spawns
 // isolates BEFORE this host creates the window, so a waker that captured the
@@ -378,8 +387,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
       if (hwnd == WinHostMainHwnd()) {
         int cw = LOWORD(l), ch = HIWORD(l);
         if (g_toolbar) SendMessageW(g_toolbar, TB_AUTOSIZE, 0, 0);
+        if (g_statusbar) SendMessageW(g_statusbar, WM_SIZE, 0, 0);   // re-dock at the bottom
         HWND cont = FindWindowExW(hwnd, nullptr, kClassName, nullptr);
-        if (cont) MoveWindow(cont, 0, g_toolbar_h, cw, ch - g_toolbar_h, TRUE);
+        if (cont) MoveWindow(cont, 0, g_toolbar_h, cw, ch - g_toolbar_h - g_statusbar_h, TRUE);
       }
       OnSurfaceResize(hwnd, LOWORD(l), HIWORD(l));
       return 0;
@@ -494,6 +504,15 @@ extern "C" int windart_run_ui_host(void) {
   // pane container below it). Measure its height for the inset.
   g_toolbar = WinToolbarCreate(main);
   g_toolbar_h = WinToolbarHeight(g_toolbar);
+  // Native status bar at the bottom (auto-positions on WM_SIZE). Measured once for
+  // the OpenPane / WM_SIZE inset so the pane never overlaps it.
+  g_statusbar = CreateWindowExW(0, STATUSCLASSNAMEW, L"WINDART — ready",
+      WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, 0, 0, 0,
+      main, nullptr, GetModuleHandleW(nullptr), nullptr);
+  if (g_statusbar != nullptr) {
+    RECT sr; GetWindowRect(g_statusbar, &sr);
+    g_statusbar_h = sr.bottom - sr.top;
+  }
   ShowWindow(main, SW_SHOW);
 
   // 3. Route THIS (UI) isolate's message wakeups to our pump (cocoa_host.mm:150).

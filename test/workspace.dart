@@ -1164,6 +1164,7 @@ void buildTab(int i) {
     default: buildPlaceholder(i); break;
   }
   ui.commit();
+  wsSetStatus('${tabNames[i]}     |     WINDART   -   image: $imgPath');
 }
 
 void switchTab(int i) {          // programmatic (self-test): set the strip + rebuild

@@ -120,11 +120,12 @@ Surface* ViewServer::OpenPane(int /*w*/, int /*h*/) {
   HWND main = WinHostMainHwnd();
   HWND host = main;
   int top = WinHostToolbarHeight();
-  if (top > 0 && main != nullptr) {
+  int bot = WinHostStatusHeight();
+  if ((top > 0 || bot > 0) && main != nullptr) {
     RECT rc; GetClientRect(main, &rc);
     HWND container = CreateWindowExW(0, WinHostWindowClassName(), L"",
         WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
-        0, top, rc.right - rc.left, rc.bottom - rc.top - top,
+        0, top, rc.right - rc.left, rc.bottom - rc.top - top - bot,
         main, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (container != nullptr) host = container;
   }

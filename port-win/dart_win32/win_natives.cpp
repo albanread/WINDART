@@ -309,6 +309,16 @@ static void Win_hostQuit(Dart_NativeArguments /*args*/) {
   if (h) PostMessageW(h, WM_CLOSE, 0, 0);
 }
 
+// _setStatus(String text) — set the native status bar text (UTF-8 -> UTF-16).
+static void Win_setStatus(Dart_NativeArguments args) {
+  const char* s = nullptr;
+  Dart_StringToCString(Dart_GetNativeArgument(args, 0), &s);
+  int n = MultiByteToWideChar(CP_UTF8, 0, s ? s : "", -1, nullptr, 0);
+  std::wstring w(n > 0 ? n - 1 : 0, L'\0');
+  if (n > 1) MultiByteToWideChar(CP_UTF8, 0, s, -1, &w[0], n);
+  WinHostSetStatus(w.c_str());
+}
+
 // _canvasBlit(int ticket, TypedData px, int w, int h) — zero-copy ExternalTypedData
 // path (the demos use the base64 'blit' draw-command instead; kept for S5+).
 static void Win_canvasBlit(Dart_NativeArguments args) { /* future: zero-copy */ }
@@ -378,6 +388,7 @@ void Sqlite_query(Dart_NativeArguments args);
   V(Win_canvasSnap, 2)                                                         \
   V(Win_surfaceSnapshot, 2)                                                    \
   V(Win_hostQuit, 0)                                                           \
+  V(Win_setStatus, 1)                                                          \
   V(Win_canvasBlit, 4)                                                         \
   V(Win_gpOpen, 5)                                                             \
   V(Win_gpClose, 0)                                                            \

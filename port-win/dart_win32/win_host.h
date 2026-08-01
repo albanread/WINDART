@@ -66,6 +66,10 @@ enum WinHostCommand {
 // 0 if no toolbar was created.
 int WinHostToolbarHeight();
 
+// Status bar height (the bottom inset), or 0 if none; and set its text (UTF-16).
+int WinHostStatusHeight();
+void WinHostSetStatus(const wchar_t* text);
+
 // The icon toolbar HWND (nullptr if none). Used by Workspace_fireCommand to
 // synthesize a faithful toolbar-button WM_COMMAND (lParam == this HWND) for the
 // headless self-test of the toolbar wiring.
