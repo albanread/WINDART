@@ -10,11 +10,11 @@ import 'dart:io';
 import 'dart:async';
 import 'dart:isolate';   // T4: spawn the debug target isolate
 import 'dart:mirrors';
-// NB: do NOT statically import a from-source user library (e.g. counter_scratch.dart)
-// here — reflecting over a source-loaded library via dart:mirrors trips a VM
-// StackResource assert (allocation.cc:37). The Browser needs mirrors, so the live
-// user class / instance-morph demo lives in the standalone workspace_morph.dart
-// (S7.3, mirrors-free); this app's Editor tab does persist + Accept-reload.
+import 'user_lib.dart';   // Stage 1: the live user library, materialized from the
+// SQLite image. Single isolate now: mirrors + a source import coexist since the
+// scanner tolerates a leading BOM (the old allocation.cc:37 abort was that BOM,
+// not a mirrors/source-loading limit). Accept rewrites user_lib.dart from the
+// image + hot-reloads, morphing live instances in place (materializeUserLib/accept).
 
 // ── lexDart (verbatim from workspace.dart) — syntax runs for the source panes ─
 final Set<String> _kw = new Set<String>.from(<String>[
@@ -617,7 +617,7 @@ String editorSourceFor(String cls) {
   db.close();
   if (rows.isNotEmpty && rows[0][0].toString().isNotEmpty) return rows[0][0].toString();
   if (cls == 'Counter') {
-    return 'class Counter {\n  int n = 0;\n  int step = 1;\n  Counter bump() { n = n + step; return this; }\n}';
+    return 'class Counter {\n  int n = 0;\n  Counter bump() { n = n + 1; return this; }\n}';
   }
   if (classMirrors.containsKey(cls)) {
     loadMembers(cls);
@@ -649,7 +649,7 @@ void buildEditor() {
   ui.editor('ed_source', frame: <int>[12, 92, W - 24, srcH]); track('ed_source');
   ui.button('ed_accept', title: 'Accept', frame: <int>[12, acceptY, 120, 28], onClick: accept); track('ed_accept');
   ui.label('ed_status', text: 'editing $currentEditClass', frame: <int>[148, acceptY + 4, W - 160, 18]); track('ed_status');
-  ui.label('ed_note', text: 'Accept SAVES the source to the SQLite image (survives restart). It does NOT live-reload the running program - genuine morphing reload (imported scratch lib) is proven in workspace_morph.dart (S7.3).', frame: <int>[12, acceptY + 36, W - 24, 18]); track('ed_note');
+  ui.label('ed_note', text: 'Accept rewrites user_lib.dart from the image + hot-reloads: live instances of user classes MORPH in place (state kept, new fields added). Persists to the image (survives restart).', frame: <int>[12, acceptY + 36, W - 24, 18]); track('ed_note');
   ui.label('ed_img', text: 'image: $imgPath', frame: <int>[12, acceptY + 62, W - 24, 18]); track('ed_img');
   var src = editorSourceFor(currentEditClass);
   ui.set('ed_source', {'text': wr(src)});
@@ -659,19 +659,54 @@ void buildEditor() {
   ui.applySpans('ed_source', lexDart(src));
 }
 
+// ── Stage 1: the live user library (materialized from the SQLite image) ───────
+// user_lib.dart (imported at the top) holds the live, editable user classes.
+// Accept writes the edited source to the image, rewrites user_lib.dart from the
+// image, and hot-reloads — live instances morph in place. (Order-B: the file is
+// swapped for a C++ DB tag handler later; see port-win/STAGE1_DESIGN.md.)
+final List<String> userClassNames = <String>['Counter'];   // the live user classes
+dynamic liveCounter;                                        // a live instance to morph
+
+String _userLibPath() =>
+    new File.fromUri(Platform.script).parent.path + '\\user_lib.dart';
+
+void materializeUserLib() {
+  var sb = new StringBuffer();
+  sb.writeln('// WINDART user library — GENERATED from the SQLite image by Accept.');
+  sb.writeln('// Edit via the Editor tab + Accept (this file is rewritten from the image).');
+  for (var name in userClassNames) {
+    sb.writeln(editorSourceFor(name).replaceAll('\r', ''));
+    sb.writeln();
+  }
+  new File(_userLibPath()).writeAsStringSync(sb.toString());
+}
+
+// Read the live instance's state via eval in the root library (sees user_lib's Counter).
+String liveState() {
+  var n = wsEval('liveCounter == null ? "-" : liveCounter.n');
+  var step = wsEval('liveCounter == null ? "" : liveCounter.step');
+  var s = 'live Counter.n=' + n;
+  if (!step.startsWith('ERR') && step.isNotEmpty) s = s + '  step=' + step;
+  return s;
+}
+
 void accept() {
   var sel = ui.editorSelection('ed_source');
   var src = sel[2].toString().replaceAll('\r\n', '\n').replaceAll('\r', '\n').trim();
   var db = openImage();
   db.exec('INSERT OR REPLACE INTO classes(name, source) VALUES(?, ?)', [currentEditClass, src]);
   db.close();
+  var isUser = userClassNames.contains(currentEditClass);
+  if (isUser) materializeUserLib();   // rewrite user_lib.dart from the image; the reload re-reads it
   wsRequestUiReload();
-  ui.set('ed_status', {'text': 'Accept: persisted to image + requested reload...'});
+  ui.set('ed_status', {'text': 'Accept: wrote image' + (isUser ? ' + user_lib.dart -> reloading (morph)...' : ' -> reloading...')});
   ui.commit();
-  new Timer(new Duration(milliseconds: 300), () {
-    ui.set('ed_status', {'text': 'Accepted $currentEditClass -> saved to image (isolate reload ran: "${wsUiReloadStatus()}")'});
+  new Timer(new Duration(milliseconds: 350), () {
+    var st = wsUiReloadStatus();
+    var live = isUser ? ('   ' + liveState()) : '';
+    ui.set('ed_status', {'text': 'Accepted $currentEditClass  (reload: "$st")$live'});
     ui.commit();
-    print('ACCEPT: persisted $currentEditClass, reload = "${wsUiReloadStatus()}"');
+    print('ACCEPT: $currentEditClass reload="$st"$live');
   });
 }
 
@@ -1127,6 +1162,10 @@ main(List<String> args) {
   imgPath = (dir.path + '\\workspace.sqlite').replaceAll('\\', '/');
   var db = openImage(); db.close();   // ensure the image + table exist
 
+  // Stage 1: a live user-class instance to morph on Accept (single isolate).
+  liveCounter = new Counter()..bump()..bump()..bump();   // n = 3
+  print('STAGE1: liveCounter created (Counter.n=${liveCounter.n})');
+
   ui = new Ui.pane(1084, 740);
   // Size the initial layout to the real pane (Win_surfaceSize reads the container's
   // client rect); fall back to the defaults if it is not ready.
@@ -1208,6 +1247,26 @@ main(List<String> args) {
       loadEditorClass('Duration');
     }); t += 500;
     new Timer(new Duration(milliseconds: t), () { snap('editor_vmclass'); }); t += 450;
+    // Stage 1: LIVE MORPH in the IDE. Counter v1 (n; bump+1) -> v2 (add `int step
+    // = 7`; bump += step). Accept rewrites user_lib.dart from the image + reloads;
+    // the live liveCounter (n=3) KEEPS n=3 and GAINS step=7 (state kept, field added).
+    new Timer(new Duration(milliseconds: t), () {
+      switchTab(2);
+      var ci = editorClassList.indexOf('Counter');
+      if (ci >= 0) ui.set('ed_class', {'index': ci});
+      loadEditorClass('Counter');
+      ui.set('ed_status', {'text': 'before Accept -> ' + liveState()});
+      ui.commit();
+    }); t += 500;
+    new Timer(new Duration(milliseconds: t), () { snap('editor_counter_v1'); }); t += 400;
+    new Timer(new Duration(milliseconds: t), () {
+      var v2 = 'class Counter {\n  int n = 0;\n  int step = 7;\n  Counter bump() { n = n + step; return this; }\n}';
+      ui.set('ed_source', {'text': wr(v2)});
+      ui.commit();
+      currentEditClass = 'Counter';
+      accept();   // -> image + user_lib.dart -> reload -> morph; accept reads liveState after 350ms
+    }); t += 950;
+    new Timer(new Duration(milliseconds: t), () { snap('editor_morph'); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { switchTab(7); refreshVM(); snap('tab_vm'); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { switchTab(3); ui.set('fd_q', {'text': 'Codec'}); ui.commit(); doFind(); snap('tab_find'); }); t += 450;
     // App: build the keypad in one tick; press + snapshot in the NEXT (a full
