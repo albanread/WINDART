@@ -386,7 +386,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
       // main using our window class (the toolbar is TOOLBARCLASSNAME).
       if (hwnd == WinHostMainHwnd()) {
         int cw = LOWORD(l), ch = HIWORD(l);
-        if (g_toolbar) SendMessageW(g_toolbar, TB_AUTOSIZE, 0, 0);
+        if (g_toolbar) MoveWindow(g_toolbar, 0, 0, cw, g_toolbar_h, TRUE);   // span the width
         if (g_statusbar) SendMessageW(g_statusbar, WM_SIZE, 0, 0);   // re-dock at the bottom
         HWND cont = FindWindowExW(hwnd, nullptr, kClassName, nullptr);
         if (cont) MoveWindow(cont, 0, g_toolbar_h, cw, ch - g_toolbar_h - g_statusbar_h, TRUE);

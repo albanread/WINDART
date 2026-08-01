@@ -23,7 +23,8 @@
 #include "win_view.h"
 #include "win_callbacks.h"
 #include "win_canvas.h"
-#include "win_host.h"    // WinHostMainHwnd (host quit)
+#include "win_host.h"    // WinHostMainHwnd (host quit) + WinHostSetStatus
+#include "win_toolbar.h" // WinToolbarPushMetric (toolbar metric graph)
 
 namespace dart {
 namespace bin {
@@ -319,6 +320,23 @@ static void Win_setStatus(Dart_NativeArguments args) {
   WinHostSetStatus(w.c_str());
 }
 
+// _pushToolbarMetric(double value, String label) — feed the toolbar's live graph.
+static void Win_pushToolbarMetric(Dart_NativeArguments args) {
+  Dart_Handle a0 = Dart_GetNativeArgument(args, 0);
+  double v = 0.0;
+  if (Dart_IsDouble(a0)) {
+    Dart_DoubleValue(a0, &v);
+  } else if (Dart_IsInteger(a0)) {
+    int64_t iv = 0; Dart_IntegerToInt64(a0, &iv); v = static_cast<double>(iv);
+  }
+  const char* s = nullptr;
+  Dart_StringToCString(Dart_GetNativeArgument(args, 1), &s);
+  int n = MultiByteToWideChar(CP_UTF8, 0, s ? s : "", -1, nullptr, 0);
+  std::wstring w(n > 0 ? n - 1 : 0, L'\0');
+  if (n > 1) MultiByteToWideChar(CP_UTF8, 0, s, -1, &w[0], n);
+  WinToolbarPushMetric(v, w.c_str());
+}
+
 // _canvasBlit(int ticket, TypedData px, int w, int h) — zero-copy ExternalTypedData
 // path (the demos use the base64 'blit' draw-command instead; kept for S5+).
 static void Win_canvasBlit(Dart_NativeArguments args) { /* future: zero-copy */ }
@@ -389,6 +407,7 @@ void Sqlite_query(Dart_NativeArguments args);
   V(Win_surfaceSnapshot, 2)                                                    \
   V(Win_hostQuit, 0)                                                           \
   V(Win_setStatus, 1)                                                          \
+  V(Win_pushToolbarMetric, 2)                                                  \
   V(Win_canvasBlit, 4)                                                         \
   V(Win_gpOpen, 5)                                                             \
   V(Win_gpClose, 0)                                                            \

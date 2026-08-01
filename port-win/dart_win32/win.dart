@@ -55,6 +55,7 @@ String _canvasSnap(int ticket, String path)           native "Win_canvasSnap";
 String _surfaceSnapshot(int surface, String path)     native "Win_surfaceSnapshot";
 void   _hostQuit()                                    native "Win_hostQuit";
 void   _setStatus(String s)                           native "Win_setStatus";
+void   _pushToolbarMetric(double v, String label)     native "Win_pushToolbarMetric";
 
 // Game pane (S6): the Direct3D 11 retro engine — the same 7-native shape as
 // dart:cocoa (gp_natives_win.cpp). A whole frame of gp verbs crosses in one
@@ -352,6 +353,9 @@ void hostQuit() => _hostQuit();
 
 /// Set the native status-bar text (the bottom band).
 void wsSetStatus(String s) => _setStatus(s);
+
+/// Push one sample into the toolbar's live metric graph, with a value label.
+void wsPushToolbarMetric(double v, String label) => _pushToolbarMetric(v, label);
 
 // ── Game pane (S6) — Dart-facing ────────────────────────────────────────────
 /// Open the D3D11 game engine at logical [w]x[h] over a [ww]x[wh] world (world

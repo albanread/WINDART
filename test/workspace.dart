@@ -845,6 +845,20 @@ void refreshVM() {
   ui.commit();
 }
 
+num _statVal(v) { try { return num.parse(v.toString()); } catch (e) { return 0; } }
+
+// Feed the toolbar's live metric graph — total heap used (MB), sampled every second
+// (always, regardless of the active tab, since the toolbar is always visible).
+void pushToolbarMetric() {
+  var s = wsVmStats();
+  if (s == null || s.length < 9) return;
+  var usedMB = (_statVal(s[0]) + _statVal(s[2])) / 1048576.0;
+  var compiled = _statVal(s[6]).toInt();
+  var codeK = (_statVal(s[8]) / 1024.0).round();
+  wsPushToolbarMetric(usedMB.toDouble(),
+      'heap ${usedMB.toStringAsFixed(1)} MB     compiled $compiled     code ${codeK}K');
+}
+
 // ── Find tab (T2): substring over classes + members -> jump to Browser ────────
 List<String> findResults = <String>[];
 void buildFind() {
@@ -1345,6 +1359,8 @@ main(List<String> args) {
 
   new Timer.periodic(new Duration(seconds: 1), (_) => refreshVM());
   new Timer.periodic(new Duration(milliseconds: 150), (_) => pollMenu());   // menu/toolbar
+  new Timer.periodic(new Duration(seconds: 1), (_) => pushToolbarMetric());  // toolbar graph
+  pushToolbarMetric();
 
   if (selftest) {
     // Pick a class with rich members for the Browser snapshot.
