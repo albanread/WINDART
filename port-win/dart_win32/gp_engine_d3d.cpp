@@ -667,10 +667,60 @@ void GpBlitter::blit(GpIndexedPane* pane, int mode, int src, int dst,
 // GpTextOverlay
 // ============================================================================
 
-static const int kCellW = 8, kCellH = 12, kThick = 2;
-static const uint8_t kDigitSegments[10] = {
-  0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
-};
+static const int kCellW = 8, kCellH = 12;   // text cell: 8px advance, 12px tall
+
+// --- font atlas: real ASCII glyphs (32..126), rasterized ONCE from a fixed-pitch
+// system font via GDI — no hand-transcribed bitmap, the OS supplies the glyphs.
+// kFontGlyphs[c-32][row] is an 8-wide column bitmask: bit `col` set = the glyph
+// inks pixel (col,row). Replaces the old 7-segment raster (digits ok, letters as
+// hollow boxes) with the full printable set. Built lazily on first draw_text.
+static const int kFontW = 8, kFontH = kCellH;
+static uint16_t kFontGlyphs[95][kFontH];
+static bool g_font_ready = false;
+
+static void EnsureFont() {
+  if (g_font_ready) return;
+  g_font_ready = true;                       // build once (on failure: all-blank)
+  HDC dc = CreateCompatibleDC(nullptr);
+  if (!dc) return;
+  BITMAPINFO bi = {};
+  bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bi.bmiHeader.biWidth = kFontW;
+  bi.bmiHeader.biHeight = -kFontH;           // top-down (row 0 = top)
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;              // BGRA; width 8 -> 32B rows, already aligned
+  void* bits = nullptr;
+  HBITMAP dib = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  if (!dib) { DeleteDC(dc); return; }
+  HGDIOBJ oldbmp = SelectObject(dc, dib);
+  // A crisp non-antialiased fixed-pitch face sized just under the cell so
+  // ascenders/descenders stay inside the 8x12 box. OUT_TT_PRECIS forces the
+  // TrueType face (a raster font would ignore the requested pixel size).
+  HFONT font = CreateFontW(-(kFontH - 1), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                           DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                           NONANTIALIASED_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+  HGDIOBJ oldfont = SelectObject(dc, font);
+  SetBkColor(dc, RGB(0, 0, 0));
+  SetTextColor(dc, RGB(255, 255, 255));
+  SetBkMode(dc, OPAQUE);
+  const uint32_t* px = static_cast<const uint32_t*>(bits);
+  for (int ci = 0; ci < 95; ci++) {
+    RECT rc = {0, 0, kFontW, kFontH};
+    wchar_t ch = static_cast<wchar_t>(32 + ci);
+    ExtTextOutW(dc, 0, 0, ETO_OPAQUE, &rc, &ch, 1, nullptr);   // fill black + draw white
+    GdiFlush();
+    for (int row = 0; row < kFontH; row++) {
+      uint16_t m = 0;
+      for (int col = 0; col < kFontW; col++)
+        if ((px[row * kFontW + col] & 0xFF) > 110)             // B channel: white -> ink
+          m |= static_cast<uint16_t>(1u << col);
+      kFontGlyphs[ci][row] = m;
+    }
+  }
+  SelectObject(dc, oldfont); DeleteObject(font);
+  SelectObject(dc, oldbmp);  DeleteObject(dib);
+  DeleteDC(dc);
+}
 
 GpTextOverlay::GpTextOverlay(GpGfx* gfx, int w, int h, std::string* err)
     : gfx_(gfx), w_(w), h_(h), dirty_(true) {
@@ -711,31 +761,18 @@ void GpTextOverlay::fill_px(int64_t x, int64_t y, int64_t w, int64_t h,
 
 void GpTextOverlay::draw_text(int64_t x, int64_t y, const char* text,
                               uint8_t r, uint8_t g, uint8_t b) {
-  const int w = kCellW, h = kCellH, t = kThick, half = kCellH / 2;
+  EnsureFont();
   for (const char* p = text; *p != '\0'; p++, x += kCellW) {
-    char c = *p;
+    unsigned char c = static_cast<unsigned char>(*p);
     if (c == ' ') continue;
-    if (c == ':') {
-      fill_px(x + w / 2 - t / 2, y + h / 3, t, t, r, g, b);
-      fill_px(x + w / 2 - t / 2, y + 2 * h / 3, t, t, r, g, b);
-      continue;
+    if (c < 32 || c > 126) c = '?';                 // map non-printables to a box
+    const uint16_t* gl = kFontGlyphs[c - 32];
+    for (int row = 0; row < kFontH; row++) {
+      uint16_t m = gl[row];
+      if (!m) continue;
+      for (int col = 0; col < kFontW; col++)
+        if (m & (1u << col)) set_px(x + col, y + row, r, g, b);
     }
-    if (c == '-') { fill_px(x, y + h / 2 - t / 2, w, t, r, g, b); continue; }
-    if (c >= '0' && c <= '9') {
-      uint8_t seg = kDigitSegments[c - '0'];
-      if (seg & 0x01) fill_px(x, y, w, t, r, g, b);
-      if (seg & 0x02) fill_px(x + w - t, y, t, half, r, g, b);
-      if (seg & 0x04) fill_px(x + w - t, y + half, t, half, r, g, b);
-      if (seg & 0x08) fill_px(x, y + h - t, w, t, r, g, b);
-      if (seg & 0x10) fill_px(x, y + half, t, half, r, g, b);
-      if (seg & 0x20) fill_px(x, y, t, half, r, g, b);
-      if (seg & 0x40) fill_px(x, y + half - t / 2, w, t, r, g, b);
-      continue;
-    }
-    fill_px(x, y, w, t, r, g, b);
-    fill_px(x, y + h - t, w, t, r, g, b);
-    fill_px(x, y, t, h, r, g, b);
-    fill_px(x + w - t, y, t, h, r, g, b);
   }
   dirty_ = true;
 }
