@@ -221,7 +221,12 @@ class Ui {
 
   void set(String id, Map props)  { _cmds.add(['set', id, props]); }
   void place(String id, List xywh) { _cmds.add(['place', id, xywh]); }
-  void remove(String id)          { _cmds.add(['remove', id]); }
+  void remove(String id) {
+    _cmds.add(['remove', id]);
+    var t = _ticketOf.remove(id);         // keep widgetIds accurate: a user app's tab
+    if (t != null) _handlers.remove(t);   // clearing diffs widgetIds before/after its
+  }                                       // build(); a stale id breaks re-visit removal
+
 
   int _add(String kind, String id, Map props, List frame) {
     var ticket = _nextTicket++;

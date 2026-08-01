@@ -1445,6 +1445,16 @@ main(List<String> args) {
       ui.commit();
       snap('tab_app');
     }); t += 450;
+    // Tab-clear regression: RE-VISIT App (a 2nd build) then switch away. The keypad
+    // must NOT bleed onto the next tab (ui.remove now drops ids from the ticket map,
+    // so buildApp's before/after widgetIds diff tracks the keypad on every visit).
+    new Timer(new Duration(milliseconds: t), () { switchTab(6); }); t += 350;   // Debug
+    new Timer(new Duration(milliseconds: t), () { switchTab(5); }); t += 350;   // App AGAIN
+    new Timer(new Duration(milliseconds: t), () {
+      switchTab(6); snap('tab_revisit');   // Debug — must be clean
+      var kcount = ui.widgetIds.where((s) => s.length >= 1 && s[0] == 'k').length;
+      print('REVISIT: keypad widgets after leaving App = $kcount (0 = truly destroyed, not hidden)');
+    }); t += 450;
     new Timer(new Duration(milliseconds: t), () { switchTab(4); selectDocsClass(docIdx); snap('tab_docs'); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { switchTab(8); snap('tab_help'); }); t += 450;
     // Debug: open the tab, run one scripted debug session (breakpoint -> pause ->
