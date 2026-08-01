@@ -32,5 +32,7 @@ main(List args, SendPort ui) {
     row('RIGHT', Keys.right);
     row('A', Keys.a);
     row('D', Keys.d);
+    row('ESC', Keys.esc);
+    row('F', Keys.f);
   });
 }

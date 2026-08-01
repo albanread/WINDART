@@ -38,6 +38,8 @@
 namespace dart {
 namespace bin {
 
+bool KeyCaptureActive();   // win_callbacks.cpp — true while a game owns the keyboard
+
 // The worker/other-isolate thread posts this to wake the UI thread and drain the
 // isolate's message queue — the performSelectorOnMainThread: / CFRunLoopSource
 // analogue. WM_APP+1 (win.rs:69). PostMessageW is the one documented-thread-safe
@@ -530,6 +532,21 @@ extern "C" int windart_run_ui_host(void) {
   //    WM_QUIT and -1 on error.
   MSG msg;
   while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    // While a game owns the keyboard (keyCapture(true)), swallow the plain game
+    // keys so they never reach the workspace controls — arrow keys must not
+    // navigate the game-selector list, Space must not click a button. The game
+    // reads them itself via keyState()/GetAsyncKeyState (global, focus-independent).
+    // Alt/Ctrl combos and every non-game key pass through untouched.
+    if ((msg.message == WM_KEYDOWN || msg.message == WM_KEYUP) &&
+        KeyCaptureActive() &&
+        !(GetKeyState(VK_MENU) & 0x8000) && !(GetKeyState(VK_CONTROL) & 0x8000)) {
+      WPARAM vk = msg.wParam;
+      if (vk == VK_LEFT || vk == VK_RIGHT || vk == VK_UP || vk == VK_DOWN ||
+          vk == VK_SPACE || vk == VK_ESCAPE ||
+          vk == 'A' || vk == 'D' || vk == 'W' || vk == 'S' || vk == 'F') {
+        continue;   // eaten: the game already polled it via keyState()
+      }
+    }
     TranslateMessage(&msg);
     DispatchMessageW(&msg);
   }

@@ -238,6 +238,7 @@ struct KeyMap { int vk; int macCode; };
 static const KeyMap kKeys[] = {
     {VK_LEFT, 123}, {VK_RIGHT, 124}, {VK_DOWN, 125}, {VK_UP, 126},
     {VK_SPACE, 49}, {'A', 0}, {'D', 2}, {'W', 13}, {'S', 1},
+    {VK_ESCAPE, 53}, {'F', 3},   // esc (end game) + F (fullscreen)
     // … extend as demos require …
 };
 

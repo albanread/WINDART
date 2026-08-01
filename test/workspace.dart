@@ -1177,7 +1177,20 @@ int gameFrames = 0;
 
 // Poll the live keyboard (GetAsyncKeyState -> [downMacCodes, mods], an untyped
 // list) and ship it as this frame's gamestate, so g.key(...) works in the game.
-void gameTick() { if (gameCtl != null && !gameDone) gameCtl.send(keyState()); }
+// Escape (macOS keycode 53) ends the game.
+void gameTick() {
+  if (gameCtl == null || gameDone) return;
+  var ks = keyState();
+  var down = (ks is List && ks.isNotEmpty && ks[0] is List) ? ks[0] : const <dynamic>[];
+  if (down.contains(53)) { endGame('stopped (Esc)  -  pick a game to play'); return; }
+  gameCtl.send(ks);
+}
+
+// User-facing stop: tear the game down AND reflect it in the status line.
+void endGame(String msg) {
+  stopGame();
+  if (activeTab == 9) { ui.set('gm_status', {'text': msg}); ui.commit(); }
+}
 void gameSchedule() {
   if (!gameDone && activeTab == 9) new Timer(new Duration(milliseconds: 16), gameTick);
 }
@@ -1227,12 +1240,20 @@ void startGame(String name) {
 
 void buildGame() {
   var W = paneW, H = paneH;
-  ui.label('gm_lbl', text: 'Game   -   pick a game; it runs in its OWN isolate, flushing frames to the D3D11 pane',
+  ui.label('gm_lbl', text: 'Game   -   runs in its OWN isolate.   Space/Up play   -   Esc or Stop ends it   -   click a name to switch',
       frame: <int>[12, 36, W - 24, 18]); track('gm_lbl');
-  ui.list('gm_list', frame: <int>[12, 60, 180, H - 96],
+  ui.list('gm_list', frame: <int>[12, 60, 180, H - 130],
       rowCount: () => gpGames.length, cellAt: (r) => gpGames[r],
-      onSelect: (r) { if (r >= 0 && r < gpGames.length) startGame(gpGames[r]); }); track('gm_list');
-  ui.label('gm_status', text: 'running: $gameSel', frame: <int>[12, H - 30, 180, 18]); track('gm_status');
+      onSelect: (r) {
+        if (r >= 0 && r < gpGames.length) {
+          startGame(gpGames[r]);
+          ui.set('gm_status', {'text': 'running: ' + gpGames[r]});
+          ui.commit();
+        }
+      }); track('gm_list');
+  ui.button('gm_stop', title: 'Stop (Esc)', frame: <int>[12, H - 62, 110, 26],
+      onClick: () { endGame('stopped  -  pick a game to play'); }); track('gm_stop');
+  ui.label('gm_status', text: 'running: $gameSel', frame: <int>[12, H - 28, 180, 16]); track('gm_status');
   var gx = 204;
   ui.game('gp', frame: <int>[gx, 60, W - gx - 12, H - 72]); track('gp');
   ui.commit();
