@@ -649,8 +649,9 @@ void buildEditor() {
   ui.popup('ed_class', items: editorClassList, frame: <int>[64, 58, 320, 260],
       onSelect: (i) { if (i >= 0 && i < editorClassList.length) loadEditorClass(editorClassList[i]); }); track('ed_class');
   ui.editor('ed_source', frame: <int>[12, 92, W - 24, srcH]); track('ed_source');
-  ui.button('ed_accept', title: 'Accept', frame: <int>[12, acceptY, 120, 28], onClick: accept); track('ed_accept');
-  ui.label('ed_status', text: 'editing $currentEditClass', frame: <int>[148, acceptY + 4, W - 160, 18]); track('ed_status');
+  ui.button('ed_accept', title: 'Accept', frame: <int>[12, acceptY, 100, 28], onClick: accept); track('ed_accept');
+  ui.button('ed_revert', title: 'Revert', frame: <int>[118, acceptY, 90, 28], onClick: revert); track('ed_revert');   // W3: undo to prior version
+  ui.label('ed_status', text: 'editing $currentEditClass', frame: <int>[216, acceptY + 4, W - 228, 18]); track('ed_status');
   ui.label('ed_note', text: 'Accept writes the user class to the SQLite image (userlib) + hot-reloads: live instances MORPH in place (state kept, new fields added). A C++ tag handler serves the source from the image - no file. Survives restart.', frame: <int>[12, acceptY + 36, W - 24, 18]); track('ed_note');
   ui.label('ed_img', text: 'image: $imgPath', frame: <int>[12, acceptY + 62, W - 24, 18]); track('ed_img');
   var src = editorSourceFor(currentEditClass);
@@ -676,9 +677,11 @@ dynamic liveCounter;                                        // a live instance t
 // Read the live instance's state via eval in the root library (sees userlib's Counter).
 String liveState() {
   var n = wsEval('liveCounter == null ? "-" : liveCounter.n');
-  var step = wsEval('liveCounter == null ? "" : liveCounter.step');
+  // inc() is a METHOD, so it re-links on every morph and tracks the source version
+  // (a field would keep its value across re-morphs — state preservation).
+  var inc = wsEval('liveCounter == null ? "" : liveCounter.inc()');
   var s = 'live Counter.n=' + n;
-  if (!step.startsWith('ERR') && step.isNotEmpty) s = s + '  step=' + step;
+  if (!inc.startsWith('ERR') && inc.isNotEmpty) s = s + '  inc()=' + inc;
   return s;
 }
 
@@ -710,6 +713,16 @@ void accept() {
   var db = openImage();
   if (isUser) {
     db.exec('CREATE TABLE IF NOT EXISTS userlib(name TEXT PRIMARY KEY, source TEXT)', const []);
+    // W3: version the outgoing source (multi-level undo). Before overwriting, save
+    // what the image currently holds for this class, so Revert can step back through
+    // the history of accepted (and therefore gate-passed, compilable) versions.
+    db.exec('CREATE TABLE IF NOT EXISTS versions(id INTEGER PRIMARY KEY AUTOINCREMENT, '
+        'ts TEXT, kind TEXT, name TEXT, source TEXT, label TEXT)', const []);
+    var cur = db.query('SELECT source FROM userlib WHERE name = ?', [currentEditClass]);
+    if (cur != null && cur.isNotEmpty && cur[0][0].toString().isNotEmpty) {
+      db.exec('INSERT INTO versions(ts, kind, name, source, label) VALUES(?, ?, ?, ?, ?)',
+          [new DateTime.now().toIso8601String(), 'userlib', currentEditClass, cur[0][0], 'pre-accept']);
+    }
     db.exec('INSERT OR REPLACE INTO userlib(name, source) VALUES(?, ?)', [currentEditClass, src]);
   } else {
     db.exec('INSERT OR REPLACE INTO classes(name, source) VALUES(?, ?)', [currentEditClass, src]);
@@ -724,6 +737,55 @@ void accept() {
     ui.set('ed_status', {'text': 'Accepted $currentEditClass  (reload: "$st")$live'});
     ui.commit();
     print('ACCEPT: $currentEditClass reload="$st"$live');
+  });
+}
+
+// W3: how many older versions of a user class are on the undo stack.
+int versionCount(String cls) {
+  var db = openImage();
+  var r = db.query('SELECT COUNT(*) FROM versions WHERE kind = ? AND name = ?', ['userlib', cls]);
+  db.close();
+  if (r == null || r.isEmpty) return 0;   // versions table not created yet
+  return int.parse(r[0][0].toString());
+}
+
+// W3: revert the current user class to its most recent prior version and hot-reload
+// (morph). Each Revert pops one entry off the undo stack, so repeated Reverts step
+// further back. Only versions that were Accepted (and so passed the syntax gate) are
+// on the stack, so the reload never sees uncompilable source.
+void revert() {
+  if (!userClassNames.contains(currentEditClass)) {
+    ui.set('ed_status', {'text': 'Revert: $currentEditClass is not a live user class'});
+    ui.commit();
+    return;
+  }
+  var db = openImage();
+  var v = db.query('SELECT id, source FROM versions WHERE kind = ? AND name = ? ORDER BY id DESC LIMIT 1',
+      ['userlib', currentEditClass]);
+  if (v == null || v.isEmpty) {
+    db.close();
+    ui.set('ed_status', {'text': 'Revert: no earlier version of $currentEditClass'});
+    ui.commit();
+    print('REVERT: $currentEditClass has no history');
+    return;
+  }
+  var id = v[0][0];
+  var oldSrc = v[0][1].toString();
+  db.exec('INSERT OR REPLACE INTO userlib(name, source) VALUES(?, ?)', [currentEditClass, oldSrc]);
+  db.exec('DELETE FROM versions WHERE id = ?', [id]);   // consume this undo step
+  db.close();
+  ui.set('ed_source', {'text': wr(oldSrc)});
+  ui.commit();
+  ui.applySpans('ed_source', lexDart(oldSrc));
+  wsRequestUiReload();   // morph live instances to the reverted version
+  ui.set('ed_status', {'text': 'Reverting $currentEditClass -> reloading (morph)...'});
+  ui.commit();
+  new Timer(new Duration(milliseconds: 350), () {
+    var st = wsUiReloadStatus();
+    var live = '   ' + liveState();
+    ui.set('ed_status', {'text': 'Reverted $currentEditClass  (reload: "$st")$live   [${versionCount(currentEditClass)} older]'});
+    ui.commit();
+    print('REVERT: $currentEditClass reload="$st"$live older=${versionCount(currentEditClass)}');
   });
 }
 
@@ -1308,13 +1370,24 @@ main(List<String> args) {
     }); t += 500;
     new Timer(new Duration(milliseconds: t), () { snap('editor_counter_v1'); }); t += 400;
     new Timer(new Duration(milliseconds: t), () {
-      var v2 = 'class Counter {\n  int n = 0;\n  int step = 7;\n  Counter bump() { n = n + step; return this; }\n}';
+      var v2 = 'class Counter {\n  int n = 0;\n  int inc() => 7;\n  Counter bump() { n = n + inc(); return this; }\n}';
       ui.set('ed_source', {'text': wr(v2)});
       ui.commit();
       currentEditClass = 'Counter';
       accept();   // -> image + user_lib.dart -> reload -> morph; accept reads liveState after 350ms
     }); t += 950;
     new Timer(new Duration(milliseconds: t), () { snap('editor_morph'); }); t += 450;
+    // W3 (versioning): a second Accept (step=11) leaves the step=7 version on the
+    // undo stack; Revert pops it and morphs the live instance back to step=7.
+    new Timer(new Duration(milliseconds: t), () {
+      var v3 = 'class Counter {\n  int n = 0;\n  int inc() => 11;\n  Counter bump() { n = n + inc(); return this; }\n}';
+      ui.set('ed_source', {'text': wr(v3)});
+      ui.commit();
+      currentEditClass = 'Counter';
+      accept();
+    }); t += 950;
+    new Timer(new Duration(milliseconds: t), () { currentEditClass = 'Counter'; revert(); }); t += 950;
+    new Timer(new Duration(milliseconds: t), () { snap('editor_revert'); }); t += 450;
     // Validated gate (syntax-check-first): a BAD edit is REJECTED before any write
     // or reload — wsCheckSyntax catches it, so the live instance AND the DB are
     // untouched and the next boot stays safe.
