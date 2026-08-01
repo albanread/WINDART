@@ -223,5 +223,34 @@ void Workspace_bakeSnapshot(Dart_NativeArguments args) {
   Dart_SetReturnValue(args, Dart_NewStringFromCString(msg));
 }
 
+// W2 (export/import-world): the git bridge, in windart_world_io.cc (host layer,
+// binary-safe — the Dart sqlite binding is text-only). extern "C": unmangled.
+extern "C" int windart_export_world(const char* outDir, char* msg, int msgSz);
+extern "C" int windart_import_world(const char* inDir, const char* outDbPath,
+                                    char* msg, int msgSz);
+
+// wsExportWorld(String dir) -> String status. Projects the SQLite image to loose,
+// diffable files under `dir` (src/*.dart + blobs/*.bin + manifest) for git.
+void Workspace_exportWorld(Dart_NativeArguments args) {
+  const char* dir = NULL;
+  Dart_StringToCString(Dart_GetNativeArgument(args, 0), &dir);
+  char msg[512];
+  windart_export_world(dir != NULL ? dir : "", msg, static_cast<int>(sizeof(msg)));
+  Dart_SetReturnValue(args, Dart_NewStringFromCString(msg));
+}
+
+// wsImportWorld(String inDir, String outDb) -> String status. Builds a fresh world
+// SQLite at `outDb` from the loose files under `inDir` (do NOT target the live image).
+void Workspace_importWorld(Dart_NativeArguments args) {
+  const char* inDir = NULL;
+  const char* outDb = NULL;
+  Dart_StringToCString(Dart_GetNativeArgument(args, 0), &inDir);
+  Dart_StringToCString(Dart_GetNativeArgument(args, 1), &outDb);
+  char msg[512];
+  windart_import_world(inDir != NULL ? inDir : "", outDb != NULL ? outDb : "", msg,
+                       static_cast<int>(sizeof(msg)));
+  Dart_SetReturnValue(args, Dart_NewStringFromCString(msg));
+}
+
 }  // namespace bin
 }  // namespace dart

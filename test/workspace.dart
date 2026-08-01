@@ -1197,18 +1197,38 @@ main(List<String> args) {
   ui.commit();
   uiReady();
 
+  // Headless one-shot commands (bake / export / import): the image work runs after
+  // the UI is up but BEFORE the periodic timers, so the fast quit does not race the
+  // 150 ms pollMenu tick during the first wake (that race left the isolate teardown
+  // exiting -1). One Timer dispatches whichever command was asked for, then quits.
+  var oneShot = null;
+  if (bake) {
+    // W1: bake the on-disk snapshot .bin into the image; the NEXT boot loads it
+    // from the DB blob (win_host fallback chain).
+    oneShot = () => print('BAKE: ' + wsBakeSnapshot());
+  } else {
+    // W2 git bridge: export <dir> projects the image to loose files; import <dir>
+    // builds <dir>/world.sqlite from them (never the live image).
+    var wExport = args.indexOf('export');
+    var wImport = args.indexOf('import');
+    if (wExport >= 0 && wExport + 1 < args.length) {
+      var dir = args[wExport + 1];
+      oneShot = () => print('EXPORT: ' + wsExportWorld(dir));
+    } else if (wImport >= 0 && wImport + 1 < args.length) {
+      var dir = args[wImport + 1];
+      oneShot = () => print('IMPORT: ' + wsImportWorld(dir, dir + '/world.sqlite'));
+    }
+  }
+  if (oneShot != null) {
+    // Exit via dart:io exit(0) rather than hostQuit()/WM_CLOSE: the GUI teardown on
+    // the fast one-shot path reports process exit -1, which would make a release
+    // script think import-world failed. exit(0) is a clean, deterministic 0.
+    new Timer(new Duration(milliseconds: 300), () { oneShot(); exit(0); });
+    return;   // a one-shot command starts no periodic timers
+  }
+
   new Timer.periodic(new Duration(seconds: 1), (_) => refreshVM());
   new Timer.periodic(new Duration(milliseconds: 150), (_) => pollMenu());   // menu/toolbar
-
-  if (bake) {
-    // W1: bake the current on-disk snapshot .bin into the SQLite image, then quit.
-    // The NEXT boot loads the snapshot from the DB blob (win_host fallback chain).
-    new Timer(new Duration(milliseconds: 150), () {
-      print('BAKE: ' + wsBakeSnapshot());
-      hostQuit();
-    });
-    return;
-  }
 
   if (selftest) {
     // Pick a class with rich members for the Browser snapshot.
