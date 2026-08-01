@@ -1166,7 +1166,7 @@ void buildPlaceholder(int i) {
 // The plug-in-app-off-the-UI-isolate model: the game runs in a spawned isolate that
 // flushes ['draw', cmds] frames over a port; we gpOpen on the first `gpopen` command,
 // then gpApply each frame and pull-pace the next. Mirrors test/game_live.dart.
-final gpGames = const ['coindash', '13_invaders', '13_invaders_hlsl', '15_brickout', '12_copper', 'tiletest', 'rgbatest', 'fonttest', 'abc'];
+final gpGames = const ['coindash', '13_invaders', '13_invaders_hlsl', '15_brickout', '12_copper', 'tiletest', 'rgbatest', 'fonttest', 'keyecho', 'abc'];
 String gameSel = 'coindash';
 const int gpW = 424, gpH = 240;              // logical game size (the engine letterboxes)
 ReceivePort gameRp;
@@ -1175,13 +1175,16 @@ Isolate gameIso;
 bool gameOpened = false, gameDone = false;
 int gameFrames = 0;
 
-void gameTick() { if (gameCtl != null && !gameDone) gameCtl.send(<dynamic>[<dynamic>[], 0]); }
+// Poll the live keyboard (GetAsyncKeyState -> [downMacCodes, mods], an untyped
+// list) and ship it as this frame's gamestate, so g.key(...) works in the game.
+void gameTick() { if (gameCtl != null && !gameDone) gameCtl.send(keyState()); }
 void gameSchedule() {
   if (!gameDone && activeTab == 9) new Timer(new Duration(milliseconds: 16), gameTick);
 }
 
 void stopGame() {
   gameDone = true;
+  keyCapture(false);              // release the keyboard back to the workspace
   if (gameRp != null) { gameRp.close(); gameRp = null; }
   gameCtl = null;
   if (gameIso != null) { try { gameIso.kill(priority: Isolate.immediate); } catch (e) {} gameIso = null; }
@@ -1190,6 +1193,8 @@ void stopGame() {
 
 void startGame(String name) {
   stopGame();
+  keyWatch();
+  keyCapture(true);               // the game owns the keyboard while it runs
   gameSel = name;
   gameDone = false; gameOpened = false; gameFrames = 0;
   var rp = new ReceivePort();

@@ -30,6 +30,7 @@ main(List<String> args) {
 
   var ui = new Ui.window('WINDART Game (live) - $game', VW + 40, VH + 92);
   keyWatch();
+  keyCapture(true);                            // the game owns the keyboard
   ui.game('gp', frame: <int>[8, 8, VW, VH]);
   ui.commit();
   uiReady();
@@ -41,9 +42,10 @@ main(List<String> args) {
   var snapped = false;
   var done = false;
 
-  // Self-play: hold no keys. Untyped List<dynamic> tick payload sidesteps the
-  // DEBUG cross-isolate type-args canonicalization assert (S6 finding).
-  void tick() { if (ctl != null && !done) ctl.send(<dynamic>[<dynamic>[], 0]); }
+  // Ship the LIVE keyboard each tick (keyState() = [downMacCodes, mods], an
+  // untyped list — safe cross-isolate; empty when nothing is held, so it still
+  // self-plays). This is what makes the arrow keys / space actually drive a game.
+  void tick() { if (ctl != null && !done) ctl.send(keyState()); }
   // Pace the next frame off the event loop (Present is vsync-capped; a small
   // Timer keeps the message pump responsive to window + key input).
   void schedule() { if (!done) new Timer(new Duration(milliseconds: 12), tick); }
