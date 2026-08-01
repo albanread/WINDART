@@ -1,144 +1,86 @@
-# Stage 1 design v2 — the inverted split: live + persistent user code in the UI isolate
+# Stage 1 design v3 — single isolate, DB-served user source (the BOM postmortem)
 
-Goal: edit a user class in the workspace, **Accept**, and the change is **(a) live** (a
-running instance morphs, InstanceMorpher + Become) and **(b) persistent** (survives
-restart) — genuinely, replacing the current save-to-DB-only Accept.
+Goal (unchanged): edit a user class → **Accept** → the change is **(a) live** (a running
+instance morphs, InstanceMorpher + Become) and **(b) persistent** (survives restart).
 
-> **v2 supersedes v1.** v1 evicted *user code* into a mirrors-free worker isolate. A
-> 4-agent adversarial review found the split inverted the wrong way; see the appendix
-> for the v1 postmortem. v2 evicts *mirrors* instead.
+> **v3 supersedes v1 (user-worker) and v2 (mirror-worker).** Both were built to avoid a
+> "mirrors + a source-imported library abort at load" constraint. That constraint was
+> **false** — the aborts were a UTF-8 **BOM** in one stale test file (`counter_scratch.dart`).
+> With the scanner now BOM-tolerant, mirrors and a user source library coexist in ONE
+> isolate (proven: 16 libs / 800 classes reflected + the imported class constructed), and
+> the live morph runs. No worker isolate, no cross-isolate protocol, no reload fork.
 
-## The constraint (unchanged, empirically pinned down)
+## What the spikes established (all now empirical)
 
-`dart:mirrors` + a **secondary source-imported library** abort at isolate load
-(`allocation.cc:37` StackResource assert), before `main()` runs. The review sharpened
-the mechanism: it is NOT "reflecting over a source-loaded library" — the boot walk
-reflects the source-loaded **root** library (`workspace.dart`, incl. `Calculator`)
-every boot without incident. The trigger is mirrors *coexisting with a secondary
-source import at load time* (n=1: `counter_scratch.dart`; a 30-min matrix spike
-bounds the residual). So mirrors and user libraries cannot share an isolate — but we
-get to choose which one moves.
+- Secondary source imports work: the demos import `pixmap.dart`/`gamepane.dart`→`abc.dart`
+  and render live; a direct `import` + construct works (`P1/P2 loaded`).
+- Mirrors + a BOM-free import in one isolate: `libs=16 classes=800, new U().inc().v=43`.
+- The morph: `workspace_morph.dart` → instance keeps `n=3`, gains `step=7`, new behavior.
+- The one trigger was the BOM (`ef bb bf`) → `allocation.cc:37`; fixed in `scanner.cc`.
 
-## Why invert: the mirrors inventory
+## Architecture v3 — single isolate
 
-An exhaustive inventory of every `dart:mirrors` use in `workspace.dart` (boot walk
-:1099-1121, `loadVarsMethods`, `classSketch`/`_typeName`/`_paramList`/`_methodDecl`,
-`buildEditorClassList`, `doFind`, Docs, the instance/class toggle) found **only static
-metadata** — names, kinds, signatures. There is no `reflect()`, no `InstanceMirror`,
-no mirror invoke anywhere. The Debug tab uses natives + spawnUri; the VM tab uses
-`wsVmStats`. So 100% of the Browser/Find/Docs data can be **precomputed strings**,
-and the UI isolate loses nothing by dropping `import 'dart:mirrors'`.
+- **One isolate** (`workspace.dart`, mirrors and all). It **imports the user library**
+  whose source is **served from the SQLite image by a C++ tag handler** (below). Live user
+  instances are ordinary objects; user classes can drive `ui.*` (editable Calculator).
+- **Do-It stays synchronous** (`wsEval` on the root library sees the imported user classes).
+- **The Browser keeps `dart:mirrors`** for SDK classes; user classes get a `user:` category
+  read from the DB (P4 renderer). No worker, no data-shipping.
 
-## Architecture v2
+## Directive B — source↔DB management in C++, deep in the VM
 
-- **UI isolate** (`workspace.dart`, mirrors-free): the GUI, the Editor, Do-It
-  (synchronous, unchanged), **and the live user library** — a statically imported,
-  DB-materialized `user_lib.dart`. Live user instances are ordinary objects here;
-  user classes may even drive `ui.*` (the Calculator can finally become an editable
-  user class — v1 forfeited that forever).
-- **Mirror worker** (stateless, mirrors-only, no user code, no GUI): computes the
-  class catalog — `libraryNames`/`classesInLib`/`libOfClass`, per-class two-side
-  member lists, signature sketches, Find's member index — and **writes it to the
-  SQLite image**. The UI reads the cached catalog every boot; the worker re-runs only
-  when the SDK/snapshot changes (it is a pure function of the core snapshot). It can
-  be a `spawnUri` isolate or even an out-of-process `dart.exe` run — it is stateless,
-  so its failure mode is benign (stale/absent catalog, refresh retried).
-- **Spawn-under-debug** (unchanged): the T4 `debug_target` pattern remains the
-  debugger story, now also for user classes (run a spawned copy under the debugger).
+Per the user: the user-source ↔ DB path lives in the **C++/embedder layer**, not Dart-side
+file juggling. A custom library tag handler serves the user library from the image:
 
-The catalog moving **into the image DB** is the point where this converges with the
-source-image direction: the image now holds user source (authoritative), the SDK
-class catalog (cache), and later the baked snapshot association (Stage 3).
+- **`WindartUserTagHandler`** (owned C++): installed via `Dart_SetLibraryTagHandler`
+  (patch `main.cc`, wrapping the stock `Loader::LibraryTagHandler`). For the `userlib:`
+  scheme it serves source **synchronously** from the SQLite image (a dedicated read-only
+  `sqlite3` connection — `sqlite3.c` is already linked; `SQLITE_THREADSAFE=1`), the same
+  shape `DartColonLibraryTagHandler` uses for `dart:` (`loader.cc:782`): `kCanonicalizeUrl`
+  → return the `userlib:` URI unchanged; `kImportTag`/`kScriptTag` → `Dart_LoadLibrary` with
+  the DB source; `kSourceTag` → `Dart_LoadSource`. Every other URI (`dart:`/`package:`/
+  `file:`) delegates to the stock handler unchanged.
+- Because reload re-invokes the isolate's tag handler (`isolate_reload.cc:628`), re-reading
+  the (now-updated) DB row on Accept morphs the live instances — **no scratch file at all**,
+  which is exactly the DB-first model. The scanner BOM fix means even a BOM-carrying DB row
+  or hand-edited file loads.
 
-## The reload path (the decisive advantage)
+## Flows
 
-Accept = write DB → re-materialize `user_lib.dart` → `wsRequestUiReload()` →
-host-deferred `PerformUiReload` (off-stack, after `Dart_HandleMessages`) →
-`force_reload` re-reads root + imports → user instances morph. Every link is already
-exercised in production TODAY: `accept()` calls `wsRequestUiReload` on every Accept
-and the whole UI isolate (workspace + dart:win) survives the force-reload;
-`workspace_morph.dart` proves the live-instance morph (kept state + new field) on a
-mirrors-free root importing a rewritten source lib. **No unproven VM behavior on the
-critical path. No new C++.**
+- **Accept** → write the edited source to `classes(name,source)` → `wsRequestUiReload()` →
+  off-stack `PerformUiReload` → `ReloadSources(force)` → tag handler re-serves the DB row →
+  instances morph → status surfaced. **Validated gate**: on reload `ERR`, the DB write is
+  rolled back (keep last-good) so the DB never holds unbootable source; boot always builds
+  the world from the DB.
+- **Do-It (user)** → `wsEval(expr)` in the root library (sees user classes); synchronous.
+- **Registry** → a `reg` map top-level (`reg["c1"] = new Counter()`); an Instances view lists
+  it so morphs are observable.
+- **Browser** → SDK via mirrors + a `user:` category from the DB (P4 source render).
 
-Reload preserves existing top-level state (proven: `gc` survived in the morph
-capstone; the running IDE survives its Accept-reloads) — so the UI, the widget
-registry, and a `reg` instance registry all persist across Accepts.
+## Product rules (carried from the gap review — still apply)
 
-## The Accept gate (critical — a bad Accept must never poison boot)
+- Editor partitions **User** (editable, Accept on) vs **VM/SDK** (read-only, "Copy as user
+  class…" forces a non-shadowing rename); the handler rejects names colliding with SDK exports.
+- Rename/delete = transactional DB row ops; removed-class reload drops orphaned `reg` entries.
+- Find/Docs extended to user classes from the DB (or explicitly deferred).
+- Do-It mirror-expressions stay valid (single isolate — no regression).
 
-Under v2 the user lib is imported by the IDE's root script, so unbootable user source
-would take the IDE down at boot. The rule that prevents it:
+## Build plan (effort ~M–L; the C++ handler is the delicate part)
 
-1. Accept: rewrite the scratch from the candidate source → `wsRequestUiReload`.
-2. Reload is atomic: on `ERR` (cancel + rollback — confirmed clean in
-   `isolate_reload.cc` Rollback), **revert the scratch** from the previous source and
-   do **not** write the DB; surface the error in the Editor status.
-3. Only on reload success is the DB updated. **The DB never holds source that has not
-   survived a reload.**
-4. Boot always re-materializes the scratch **from the DB** (never trusts a stale
-   scratch), so a crash mid-Accept cannot leave a poisoned compile input.
+- **B1 — user tag handler (C++)**: `WindartUserTagHandler` serving one `userlib:` library
+  from the image + install hunk in `main.cc`; a dedicated read-only sqlite3 connection to
+  the image. Spike: `import 'userlib:user'` of a DB-stored class loads + constructs.
+- **B2 — Accept/reload/registry (Dart)**: workspace imports `userlib:user`; `reg`; Accept =
+  DB write → reload → morph → status; validated gate; Instances view.
+- **B3 — Browser/Editor user surface (Dart)**: `user:` category, Editor partition +
+  copy-as-user-class, rename/delete, Find/Docs.
 
-## Product rules (from the gaps review — apply regardless of split)
+## Appendix — the postmortem
 
-- **Editor partition**: User classes = editable, Accept enabled. VM/SDK classes =
-  read-only viewer (Accept disabled) + a "Copy as user class…" gesture that forces a
-  non-shadowing rename. The materializer rejects names colliding with imported-library
-  exports (an Accepted `Duration` shadow was both incoherent and uncompilable).
-- **Do-It**: stays local + synchronous (the routing problem of v1 vanishes). One
-  honest regression: mirror-expressions in Do-It (`currentMirrorSystem()...`) no
-  longer work — the catalog data is precomputed instead; state it in Help.
-- **Registry + visibility**: a `reg` map top-level (Do-It: `reg["c1"] = new
-  Counter()`), plus an Instances view (Browser `user:` pane or Workspace section)
-  enumerating `reg` with `toString()` — morphs must be observable.
-- **Rename/delete**: transactional row ops (rename = insert-new + delete-old); define
-  reload behavior for removed classes (orphaned instances dropped from `reg` with a
-  warning). Today the DB only ever grows — add delete.
-- **Find/Docs**: extend to user classes from the DB (names + source scan), or state
-  the deferral explicitly.
-- **Browser `user:` category**: user classes listed from the DB; source pane renders
-  DB source via the P4 text renderer; member lists via a light source parse
-  (signature-fidelity not required for user code — we have the real source).
-
-## Spikes before building (all cheap, total ~0.5–1d)
-
-- **S-a**: `Isolate.spawnUri` of a script importing `dart:mirrors` (the one untested
-  combination for the worker). Fallback if it fails: out-of-process `dart.exe` worker
-  writing to the image DB — B survives either outcome.
-- **S-b**: the abort matrix (mirrors × {file import, spawnUri}) to bound the
-  `allocation.cc:37` mechanism beyond n=1.
-- **S-c**: one-liner — `wsEval('new Counter()')` constructor resolution in the root
-  library (the morph capstone proved method calls; cover constructors).
-
-## Build plan (effort ~M, zero new C++)
-
-- **B1 — mirror worker + catalog**: move the boot walk + `classSketch`/
-  `loadVarsMethods`/member-index into a worker script; write the catalog to the
-  image DB (versioned by SDK build); UI boots from the cached catalog.
-- **B2 — Browser refactor**: Browser/Find/Docs/Editor consume the precomputed maps;
-  drop `import 'dart:mirrors'` from `workspace.dart`. (Mechanical — the call sites
-  already consume lists/strings.)
-- **B3 — live user lib**: static import of the materialized `user_lib.dart`; the
-  validated Accept pipeline above; `reg` + Instances view; Editor partition +
-  copy-as-user-class; rename/delete.
-
-## Appendix: v1 postmortem (what the review established)
-
-- v1's Approach 2 ("embedder takes over the spawnUri'd user isolate's loop") is
-  **unimplementable as written**: a spawnUri isolate is permanently pool-attached
-  (`message_handler.cc:105-126`; `pool_` cleared only at shutdown), `PostMessage`
-  spawns the pool task *before* the notify callback fires, and an outside
-  `Dart_EnterIsolate` races into the "Multiple mutators" FATAL
-  (`dart_api_impl.cc:1395-1404`) — or, release-mode, a discarded-return null-`Thread`
-  entry (`isolate.h:919-933`). The real variant required an embedder-created isolate
-  and serialized user compute onto the UI thread.
-- v1's Approach 1 (self-reload) was actually *viable*: upstream ships it as the
-  `--reload-every` stress mode (`runtime_entry.cc:1687-1734`), and failure modes are
-  clean cancel + rollback. But under v2 the entire fork is moot.
-- `wsReload` has zero call sites in the repo — every real reload goes through the
-  deferred host path. v1's "proven in-repo" claim was true of the native's existence,
-  not its exercise.
-- Corrections: dart:win per-isolate registration is `dartutils.cc:698-701` (v1 cited
-  293-300); T1's "reflecting over a non-snapshot library crashes" mechanism note is
-  refuted (the boot walk does exactly that every boot) — the trigger is the
-  secondary-import coexistence, as above.
+- The `allocation.cc:37` abort that spawned the entire two-isolate line of design was a
+  UTF-8 BOM in `counter_scratch.dart`, mishandled by 1.24.3's scanner. `workspace_morph`
+  ("the proven morph") imported it, so it too crashed — the "proof" hadn't actually run in
+  this build. Fix: skip a leading U+FEFF in `Scanner::Reset` (committed).
+- Lesson kept: verify a load-bearing "it crashes" claim by isolating the *file*, not just
+  the *feature* — a single stale byte-order mark drove ~two design rounds and two review
+  workflows before a bare-minimum repro (`dart.exe` + one import) exposed it.
